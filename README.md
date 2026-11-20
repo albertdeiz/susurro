@@ -90,6 +90,12 @@ uv run susurro uninstall
   Accessibility is granted. Also make sure Python is enabled in the Accessibility list.
 - TLS is validated against the macOS keychain (`truststore`), so it works behind proxies that
   inspect traffic with their own CA.
+- **Speed.** macOS local voices are the fastest: in *Read as is* the first audio starts ~0.1 s
+  after the selection is grabbed. Edge voices take ~1.2 s per line when the service is quick,
+  but Microsoft throttles it after heavy use, and then a line can take 5-15 s. Susurro
+  synthesizes several lines ahead to hide that, but the first line still has to wait. In
+  *Narrated* and *Podcast* modes, Claude needs ~1.5 s to write the first sentence; Susurro keeps
+  a `claude -p` process started ahead (about 250 MB of memory) to save another ~0.8 s.
 - Local "Enhanced" and "Premium" voices sound far better than the basic ones. Install them from
   System Settings → Accessibility → Spoken Content → System voice → Manage voices.
 - Language detection is a simple word-frequency heuristic. For very short or mixed-language
