@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import atexit
 import subprocess
 import sys
+import threading
 import time
 
 import rumps
@@ -40,6 +42,7 @@ class SusurroApp(rumps.App):
         self._build_menu()
         self.httpd = serve(self.player, lambda: self.settings)
         self._last_status = None
+        self._prewarm()
         rumps.Timer(self._tick, 0.15).start()
         rumps.Timer(self._check_trust, 2).start()
 
@@ -118,6 +121,14 @@ class SusurroApp(rumps.App):
             setattr(self.settings, k, v)
         config.save(self.settings)
         self._build_menu()
+        self._prewarm()
+
+    def _prewarm(self) -> None:
+        """Start Claude ahead in the language the next request most likely needs."""
+        s = self.settings
+        lang = s.language if s.language != "auto" else (self.player.language or s.ui_language)
+        threading.Thread(target=writer.prewarm, args=(s, lang), daemon=True).start()
+        self.player.warm_up(s, lang)
 
     def _set_voice(self, lang: str, voice: str) -> None:
         self.settings.voices[self.settings.engine][lang] = voice
@@ -189,6 +200,7 @@ class SusurroApp(rumps.App):
         self.player.stop()
         self.hotkey.stop()
         self.httpd.shutdown()
+        writer.shutdown()
         rumps.quit_application()
 
     def _tick(self, _) -> None:
@@ -235,4 +247,5 @@ class SusurroApp(rumps.App):
 
 
 def run() -> None:
+    atexit.register(writer.shutdown)  # don't leave the warm Claude process behind
     SusurroApp().run()
