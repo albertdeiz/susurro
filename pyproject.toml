@@ -1,0 +1,20 @@
+[project]
+name = "susurro"
+version = "0.1.0"
+description = "Select text on your Mac, press a shortcut, and listen: read aloud, narrated, or as a podcast."
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.70",
+    "edge-tts>=7.0",
+    "pyobjc-framework-applicationservices>=11",
+    "pyobjc-framework-quartz>=11",
+    "rumps>=0.4",
+    "truststore>=0.10",
+]
+
+[project.scripts]
+susurro = "susurro.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
