@@ -147,7 +147,7 @@ def wait_for_release(keycode: int, timeout: float = 2.0) -> bool:
         held_mods = CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & _MOD_MASK
         if not held_mods and not CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, keycode):
             return True
-        time.sleep(0.01)
+        time.sleep(0.005)
     return False
 
 
@@ -159,7 +159,7 @@ def copy_selection(timeout: float = 1.0) -> str:
     _send_copy()
     deadline = time.monotonic() + timeout
     while pb.changeCount() == before and time.monotonic() < deadline:
-        time.sleep(0.02)
+        time.sleep(0.005)
     if pb.changeCount() == before:
         _log(f"⌘C ignored by {_front_app()} (clipboard unchanged after {timeout}s)")
         return ""  # nothing selected, or the app ignored ⌘C
