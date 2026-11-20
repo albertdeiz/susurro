@@ -7,7 +7,8 @@
 
 Claude is reached in this order:
 1. The Anthropic SDK, if ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set.
-2. The `claude -p` CLI (your Claude Code session) otherwise.
+2. The `claude -p` CLI (your Claude Code session) otherwise. Starting it costs ~1 s, so one
+   process is kept started ahead ("warm"), waiting on stdin for the next text.
 """
 
 from __future__ import annotations
@@ -106,8 +107,15 @@ def _chunks_for_reading(text: str, target: int = 280) -> Iterator[Utterance]:
 # ---------------------------------------------------------------- line parsing
 
 
+# The first utterance is cut at its first sentence end (once it's this long) instead of waiting
+# for the whole line: the listener hears audio sooner, and the rest follows as the next line.
+_FIRST_CUT = re.compile(r"[.!?…](?=\s)")
+_FIRST_MIN = 30
+
+
 def _lines_to_utterances(chunks: Iterator[str], mode: str) -> Iterator[Utterance]:
     pending = ""
+    first = True
 
     def parse(line: str) -> Utterance | None:
         line = line.strip().strip("*").strip()
@@ -121,10 +129,21 @@ def _lines_to_utterances(chunks: Iterator[str], mode: str) -> Iterator[Utterance
 
     for chunk in chunks:
         pending += chunk
+        if first and "\n" not in pending:
+            m = next((m for m in _FIRST_CUT.finditer(pending) if m.end() >= _FIRST_MIN), None)
+            if m:
+                u = parse(pending[: m.end()])
+                if u:
+                    first = False
+                    rest = pending[m.end():].lstrip()
+                    # Keep the speaker for the rest of the line in podcast mode.
+                    pending = f"{u.speaker}: {rest}" if mode == "podcast" else rest
+                    yield u
         while "\n" in pending:
             line, pending = pending.split("\n", 1)
             u = parse(line)
             if u:
+                first = False
                 yield u
     u = parse(pending)
     if u:
@@ -178,14 +197,12 @@ def _claude_cli() -> str | None:
     return None
 
 
-def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) -> Iterator[str]:
-    exe = _claude_cli()
-    if not exe:
-        raise WriterError("No ANTHROPIC_API_KEY and no `claude` CLI; set up one of them.")
-    cmd = [
+def _cli_command(exe: str, model: str, system: str) -> list[str]:
+    return [
         exe, "-p",
+        "--input-format", "stream-json",  # waits for messages on stdin, so it can start early
         "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-        "--model", s.model,
+        "--model", model,
         "--effort", "low",
         "--system-prompt", system,
         "--tools", "",
@@ -193,7 +210,10 @@ def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) ->
         "--disable-slash-commands",
         "--no-session-persistence",
     ]
-    proc = subprocess.Popen(
+
+
+def _spawn_cli(cmd: list[str]) -> subprocess.Popen:
+    return subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -201,9 +221,76 @@ def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) ->
         text=True,
         cwd=tempfile.gettempdir(),  # keep any project's CLAUDE.md out
     )
+
+
+class _Warm:
+    """One `claude -p` process started ahead for the next request with the same prompt."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cmd: list[str] | None = None
+        self._proc: subprocess.Popen | None = None
+
+    def prepare(self, cmd: list[str]) -> None:
+        with self._lock:
+            if self._cmd == cmd and self._proc and self._proc.poll() is None:
+                return
+            self._kill()
+            self._cmd, self._proc = cmd, _spawn_cli(cmd)
+
+    def take(self, cmd: list[str]) -> subprocess.Popen:
+        """The warm process if it matches `cmd` (and starts the next one), else a fresh one."""
+        with self._lock:
+            proc = None
+            if self._cmd == cmd and self._proc and self._proc.poll() is None:
+                proc, self._proc = self._proc, None
+            else:
+                self._kill()
+                self._cmd = cmd
+            self._proc = _spawn_cli(cmd)  # ready for the next request
+        return proc or _spawn_cli(cmd)
+
+    def close(self) -> None:
+        with self._lock:
+            self._kill()
+            self._cmd = None
+
+    def _kill(self) -> None:
+        if self._proc and self._proc.poll() is None:
+            self._proc.kill()
+            self._proc.wait()
+        self._proc = None
+
+
+_warm = _Warm()
+
+
+def prewarm(s: Settings, lang: str) -> None:
+    """Start Claude ahead for the next narrate/podcast request in `lang`; stop it otherwise."""
+    exe = _claude_cli()
+    if s.mode == "read" or backend_name() != "cli" or not exe:
+        _warm.close()
+        return
+    _warm.prepare(_cli_command(exe, s.model, _system_prompt(s.mode, s.minutes, lang)))
+
+
+def shutdown() -> None:
+    _warm.close()
+
+
+def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) -> Iterator[str]:
+    exe = _claude_cli()
+    if not exe:
+        raise WriterError("No ANTHROPIC_API_KEY and no `claude` CLI; set up one of them.")
+    proc = _warm.take(_cli_command(exe, s.model, system))
     assert proc.stdin and proc.stdout
-    proc.stdin.write(_user_prompt(text))
-    proc.stdin.close()
+    message = {"type": "user", "message": {"role": "user", "content": _user_prompt(text)}}
+    try:
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+    except BrokenPipeError as e:
+        err = proc.stderr.read().strip() if proc.stderr else ""
+        raise WriterError(f"claude -p exited early: {err[:300]}") from e
     got_text = False
     try:
         for raw in proc.stdout:
@@ -219,15 +306,17 @@ def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) ->
                 if e.get("type") == "content_block_delta" and d.get("type") == "text_delta":
                     got_text = True
                     yield d.get("text", "")
-            elif ev.get("type") == "result" and ev.get("is_error"):
-                raise WriterError(f"claude -p failed: {ev.get('result') or ev.get('subtype')}")
-            elif ev.get("type") == "result" and not got_text and ev.get("result"):
-                yield ev["result"]  # in case no partial deltas arrived
+            elif ev.get("type") == "result":
+                if ev.get("is_error"):
+                    raise WriterError(f"claude -p failed: {ev.get('result') or ev.get('subtype')}")
+                if not got_text and ev.get("result"):
+                    yield ev["result"]  # in case no partial deltas arrived
+                return  # one request per process: the reply is complete
     finally:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
-    if proc.returncode not in (0, None, -9) and not got_text and not cancel.is_set():
+    if not got_text and not cancel.is_set():
         err = proc.stderr.read().strip() if proc.stderr else ""
         raise WriterError(f"claude -p exited with code {proc.returncode}: {err[:300]}")
 
