@@ -19,9 +19,9 @@ MINUTES = [1, 3, 5, 10]
 ENGINES = ("edge", "say")
 DEFAULT_HOTKEY = "ctrl+s"
 
-# VOICES[engine][language] = {voice_id: (label, partner_voice_id)}
-# The partner is the second host's voice in podcast mode.
-VOICES: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
+# VOICES[engine][language] = {voice_id: (label, partner)}
+# The partner is the second host's voice in podcast mode: a voice id, or candidates in order.
+VOICES: dict[str, dict[str, dict[str, tuple[str, str | tuple[str, ...]]]]] = {
     # Microsoft Edge neural voices: free, no API key, online.
     "edge": {
         "es": {
@@ -61,24 +61,26 @@ VOICES: dict[str, dict[str, dict[str, tuple[str, str]]]] = {
     },
     # macOS voices: 100% local. "Enhanced"/"Premium" variants sound much better:
     # System Settings → Accessibility → Spoken Content → System voice → Manage voices.
+    # The partner is a list of candidates: the first one installed is used. Eddy, Flo and the
+    # rest of the Eloquence voices sound robotic, so they are only the last resort.
     "say": {
         "es": {
-            "Mónica": ("Mónica · España", "Eddy (Spanish (Spain))"),
-            "Paulina": ("Paulina · México", "Eddy (Spanish (Mexico))"),
-            "Flo (Spanish (Mexico))": ("Flo · México", "Eddy (Spanish (Mexico))"),
-            "Eddy (Spanish (Spain))": ("Eddy · España", "Mónica"),
-            "Eddy (Spanish (Mexico))": ("Eddy · México", "Flo (Spanish (Mexico))"),
+            "Mónica": ("Mónica · España", ("Jorge", "Juan", "Paulina", "Eddy (Spanish (Spain))")),
+            "Paulina": ("Paulina · México", ("Juan", "Jorge", "Mónica", "Eddy (Spanish (Mexico))")),
+            "Flo (Spanish (Mexico))": ("Flo · México", ("Juan", "Jorge", "Paulina")),
+            "Eddy (Spanish (Spain))": ("Eddy · España", ("Mónica",)),
+            "Eddy (Spanish (Mexico))": ("Eddy · México", ("Paulina",)),
         },
         "en": {
-            "Samantha": ("Samantha · US", "Eddy (English (US))"),
-            "Daniel": ("Daniel · UK", "Flo (English (UK))"),
-            "Flo (English (US))": ("Flo · US", "Eddy (English (US))"),
-            "Eddy (English (US))": ("Eddy · US", "Samantha"),
+            "Samantha": ("Samantha · US", ("Evan", "Nathan", "Tom", "Daniel")),
+            "Daniel": ("Daniel · UK", ("Kate", "Serena", "Samantha")),
+            "Flo (English (US))": ("Flo · US", ("Evan", "Nathan", "Tom", "Daniel")),
+            "Eddy (English (US))": ("Eddy · US", ("Samantha",)),
         },
         "pt": {
-            "Luciana": ("Luciana · Brasil", "Eddy (Portuguese (Brazil))"),
-            "Joana": ("Joana · Portugal", "Eddy (Portuguese (Brazil))"),
-            "Eddy (Portuguese (Brazil))": ("Eddy · Brasil", "Luciana"),
+            "Luciana": ("Luciana · Brasil", ("Felipe", "Joana", "Eddy (Portuguese (Brazil))")),
+            "Joana": ("Joana · Portugal", ("Felipe", "Luciana")),
+            "Eddy (Portuguese (Brazil))": ("Eddy · Brasil", ("Luciana",)),
         },
     },
 }
@@ -136,7 +138,12 @@ class Settings:
 
     def partner_voice(self, lang: str) -> str:
         v = self.voice(lang)
-        return VOICES[self.engine][lang].get(v, ("", v))[1]
+        partner = VOICES[self.engine][lang].get(v, ("", v))[1]
+        if isinstance(partner, str):
+            return partner
+        from . import tts
+
+        return next((c for c in partner if tts.installed(c)), partner[-1])
 
     def normalize(self) -> "Settings":
         if self.mode not in MODES:

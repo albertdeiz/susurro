@@ -102,6 +102,11 @@ def _voice_id(name: str) -> str | None:
     return str(found[0]) if found else None
 
 
+def installed(name: str) -> bool:
+    """Whether a macOS voice with that name is installed."""
+    return _voice_id(name) is not None
+
+
 def _synth_for(voice_id: str):
     from AppKit import NSSpeechSynthesizer
 
