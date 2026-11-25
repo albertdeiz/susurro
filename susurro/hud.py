@@ -29,6 +29,7 @@ from AppKit import (
     NSProgressIndicator,
     NSProgressIndicatorStyleSpinning,
     NSScreen,
+    NSSlider,
     NSStatusWindowLevel,
     NSTextField,
     NSVisualEffectBlendingModeBehindWindow,
@@ -135,6 +136,18 @@ class HUD:
             self._panel.orderFrontRegardless()
             self._visible = True
 
+    def _update_seek(self, progress) -> None:
+        n = len(progress.lines)
+        self._seek.setEnabled_(n > 0)
+        counter = f"{min(progress.index + 1, n)} / {n}{'' if progress.written else '…'}"
+        if self._counter.stringValue() != counter:
+            self._counter.setStringValue_(counter)
+        if self._seek.tracking:
+            return  # the user is dragging it
+        if self._seek.maxValue() != max(n, 1):
+            self._seek.setMaxValue_(max(n, 1))
+        self._seek.setDoubleValue_(progress.index + progress.position)
+
     def hide(self) -> None:
         if self._visible:
             self._spinner.stopAnimation_(None)
@@ -156,6 +169,8 @@ class HUD:
 PANEL_WIDTH = 620
 PANEL_PAD = 12
 ROW = 28  # transport row
+SEEK_ROW = 20
+COUNTER_W = 64
 SETTING_ROW = 46  # one row of setting tiles
 TILE_GAP = 8
 ROW_GAP = 6
@@ -173,6 +188,22 @@ class _Button(NSButton):
 class _PopUp(NSPopUpButton):
     def acceptsFirstMouse_(self, event) -> bool:
         return True
+
+
+class _Slider(NSSlider):
+    """Reports whether the user is dragging it, so playback doesn't move it meanwhile."""
+
+    tracking = False
+
+    def acceptsFirstMouse_(self, event) -> bool:
+        return True
+
+    def mouseDown_(self, event) -> None:
+        self.tracking = True
+        try:
+            objc.super(_Slider, self).mouseDown_(event)  # returns on mouse up
+        finally:
+            self.tracking = False
 
 
 class _PanelView(NSVisualEffectView):
@@ -266,6 +297,23 @@ class PlayerPanel:
         self._status.setLineBreakMode_(NSLineBreakByTruncatingTail)
         view.addSubview_(self._status)
 
+        # Seek bar over the lines of the script: value = line index + fraction played.
+        self._seek = _Slider.alloc().initWithFrame_(NSMakeRect(0, 0, 100, SEEK_ROW))
+        self._seek.setControlSize_(NSControlSizeSmall)
+        self._seek.setMinValue_(0)
+        self._seek.setMaxValue_(1)
+        self._seek.setContinuous_(False)  # seek once, on release
+        target = _Target.alloc().initWithHandler_(lambda sender: actions.seek(sender.doubleValue()))
+        self._targets.append(target)
+        self._seek.setTarget_(target)
+        self._seek.setAction_("fire:")
+        view.addSubview_(self._seek)
+        self._counter = NSTextField.labelWithString_("")
+        self._counter.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0))
+        self._counter.setTextColor_(NSColor.secondaryLabelColor())
+        self._counter.setAlignment_(2)  # right
+        view.addSubview_(self._counter)
+
         # Live settings: a grid of tiles (icon, caption, value), filled by _fill_settings.
         self._separator = NSBox.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 1))
         self._separator.setBoxType_(2)  # NSBoxSeparator
@@ -341,7 +389,7 @@ class PlayerPanel:
     # ------------------------------------------------------------ layout
 
     def _layout(self) -> None:
-        rows = [ROW]
+        rows = [ROW, SEEK_ROW]
         if self._show_settings:
             rows.append(1)  # separator
             rows += [SETTING_ROW] * ((len(self._setting_names) + COLUMNS - 1) // COLUMNS)
@@ -361,6 +409,12 @@ class PlayerPanel:
         self._gear.setFrame_(NSMakeRect(right, y, ROW, ROW))
         lh = self._status.fittingSize().height
         self._status.setFrame_(NSMakeRect(x, y + (ROW - lh) / 2, right - GAP - x, lh))
+
+        y -= ROW_GAP + SEEK_ROW
+        right = PANEL_WIDTH - PANEL_PAD - COUNTER_W
+        self._seek.setFrame_(NSMakeRect(PANEL_PAD, y, right - GAP - PANEL_PAD, SEEK_ROW))
+        lh = self._counter.fittingSize().height
+        self._counter.setFrame_(NSMakeRect(right, y + (SEEK_ROW - lh) / 2, COUNTER_W, lh))
 
         self._separator.setHidden_(not self._show_settings)
         for tile in self._tiles.values():
@@ -403,10 +457,12 @@ class PlayerPanel:
 
     # ------------------------------------------------------------ API
 
-    def show(self, status: str, spinning: bool, paused: bool,
+    def show(self, status: str, spinning: bool, progress,
              settings: dict[str, tuple[str, dict, object]], show_settings: bool) -> None:
-        """settings: see _fill_settings; rebuilt only when it changes."""
+        """progress: player.Progress. settings: see _fill_settings, rebuilt only on change."""
         relayout = False
+        paused = progress.paused
+        self._update_seek(progress)
         if self._status.stringValue() != status:
             self._status.setStringValue_(status)
         if spinning == self._spinner.isHidden():
@@ -435,6 +491,18 @@ class PlayerPanel:
             self._place()
             self._panel.orderFrontRegardless()
             self._visible = True
+
+    def _update_seek(self, progress) -> None:
+        n = len(progress.lines)
+        self._seek.setEnabled_(n > 0)
+        counter = f"{min(progress.index + 1, n)} / {n}{'' if progress.written else '…'}"
+        if self._counter.stringValue() != counter:
+            self._counter.setStringValue_(counter)
+        if self._seek.tracking:
+            return  # the user is dragging it
+        if self._seek.maxValue() != max(n, 1):
+            self._seek.setMaxValue_(max(n, 1))
+        self._seek.setDoubleValue_(progress.index + progress.position)
 
     def hide(self) -> None:
         if self._visible:

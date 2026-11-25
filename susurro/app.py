@@ -275,7 +275,7 @@ class SusurroApp(rumps.App):
                 text = "⚠️  " + st.removeprefix("error: ")
             else:
                 text = self._status_label(st)
-            self.panel.show(text, st in ("preparing", "thinking"), progress.paused,
+            self.panel.show(text, st in ("preparing", "thinking"), progress,
                             self._panel_settings(), self.settings.panel_settings)
             return
         self.panel.hide()
