@@ -123,6 +123,8 @@ class Settings:
     ui_language: str = field(default_factory=system_language)
     # Chosen voice per engine and language.
     voices: dict[str, dict[str, str]] = field(default_factory=_default_voices)
+    # Second host's voice per engine and language; missing means the catalog's pairing.
+    partners: dict[str, dict[str, str]] = field(default_factory=dict)
     # Claude model used for narrate / podcast.
     model: str = "claude-opus-5-5"
     # Target length of narrate / podcast, in minutes.
@@ -137,6 +139,10 @@ class Settings:
         return self.voices.get(self.engine, {}).get(lang) or DEFAULT_VOICES[self.engine][lang]
 
     def partner_voice(self, lang: str) -> str:
+        return self.partners.get(self.engine, {}).get(lang) or self.auto_partner(lang)
+
+    def auto_partner(self, lang: str) -> str:
+        """The catalog's pairing for the main voice (the first installed candidate)."""
         v = self.voice(lang)
         partner = VOICES[self.engine][lang].get(v, ("", v))[1]
         if isinstance(partner, str):
@@ -160,6 +166,10 @@ class Settings:
                 if v in VOICES.get(eng, {}).get(lang, {}):
                     merged[eng][lang] = v
         self.voices = merged
+        self.partners = {
+            eng: {lang: v for lang, v in (per_lang or {}).items()
+                  if v in VOICES.get(eng, {}).get(lang, {})}
+            for eng, per_lang in (self.partners or {}).items() if eng in VOICES}
         from .hotkey import validate  # local import: hotkey pulls in Quartz
         try:
             self.hotkey = validate(self.hotkey)

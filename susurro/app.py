@@ -74,8 +74,17 @@ class SusurroApp(rumps.App):
         for lang in LANGUAGES:
             sub = rumps.MenuItem(LANGUAGE_NAMES[lang])
             options = {v: label for v, (label, _) in VOICES[s.engine][lang].items()}
-            self._radio(sub, options, s.voice(lang),
+            main = rumps.MenuItem(tr("voice.main"))
+            self._radio(main, options, s.voice(lang),
                         lambda v, lang=lang: self._set_voice(lang, v))
+            auto = s.auto_partner(lang)
+            auto_label = VOICES[s.engine][lang].get(auto, (auto,))[0]
+            second = rumps.MenuItem(tr("voice.second"))
+            self._radio(second, {"": f"{tr('voice.auto')} ({auto_label})", **options},
+                        s.partners.get(s.engine, {}).get(lang, ""),
+                        lambda v, lang=lang: self._set_partner(lang, v))
+            sub.add(main)
+            sub.add(second)
             voice_menu.add(sub)
 
         speech_langs = {"auto": tr("lang.auto"), **LANGUAGE_NAMES}
@@ -136,6 +145,17 @@ class SusurroApp(rumps.App):
 
     def _set_voice(self, lang: str, voice: str) -> None:
         self.settings.voices[self.settings.engine][lang] = voice
+        config.save(self.settings)
+        self._build_menu()
+        self.player.update(self.settings)
+
+    def _set_partner(self, lang: str, voice: str) -> None:
+        """voice "" goes back to the automatic pairing."""
+        per_lang = self.settings.partners.setdefault(self.settings.engine, {})
+        if voice:
+            per_lang[lang] = voice
+        else:
+            per_lang.pop(lang, None)
         config.save(self.settings)
         self._build_menu()
         self.player.update(self.settings)
