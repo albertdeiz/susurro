@@ -6,7 +6,10 @@ import re
 
 STRINGS: dict[str, dict[str, str]] = {
     "en": {
-        "preparing": "Preparing audio…", "click_stop": "click to stop",
+        "paused": "Paused", "short.mode": "Mode", "short.speed": "Speed",
+        "short.minutes": "Length", "short.language": "Language", "short.engine": "Engine",
+        "short.voice": "Voice",
+        "preparing": "Preparing audio…",
         "shortcut": "Shortcut", "grant": "⚠️ Allow Accessibility for the shortcut…",
         "no_selection": "No text selected",
         "shortcut.other": "Other…", "shortcut.title": "Shortcut",
@@ -25,7 +28,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "backend.cli": "Claude Code (claude -p)", "backend.none": "not available",
     },
     "es": {
-        "preparing": "Preparando audio…", "click_stop": "clic para detener",
+        "paused": "En pausa", "short.mode": "Modo", "short.speed": "Velocidad",
+        "short.minutes": "Duración", "short.language": "Idioma", "short.engine": "Motor",
+        "short.voice": "Voz",
+        "preparing": "Preparando audio…",
         "shortcut": "Atajo", "grant": "⚠️ Permitir Accesibilidad para el atajo…",
         "no_selection": "No hay texto seleccionado",
         "shortcut.other": "Otro…", "shortcut.title": "Atajo",
@@ -44,7 +50,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "backend.cli": "Claude Code (claude -p)", "backend.none": "no disponible",
     },
     "pt": {
-        "preparing": "Preparando áudio…", "click_stop": "clique para parar",
+        "paused": "Pausado", "short.mode": "Modo", "short.speed": "Velocidade",
+        "short.minutes": "Duração", "short.language": "Idioma", "short.engine": "Motor",
+        "short.voice": "Voz",
+        "preparing": "Preparando áudio…",
         "shortcut": "Atalho", "grant": "⚠️ Permitir Acessibilidade para o atalho…",
         "no_selection": "Nenhum texto selecionado",
         "shortcut.other": "Outro…", "shortcut.title": "Atalho",

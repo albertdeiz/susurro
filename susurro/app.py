@@ -14,12 +14,11 @@ from AppKit import NSApp
 from . import config, hotkey, writer
 from .config import ENGINES, LANGUAGE_NAMES, LANGUAGES, MINUTES, MODES, SPEEDS, VOICES
 from .i18n import t
-from .hud import HUD
+from .hud import HUD, PanelActions, PlayerPanel
 from .player import CHIME_ERROR, Player, chime
 from .server import serve
 
-ICONS = {"idle": "🗣", "preparing": "⏳", "thinking": "💭", "speaking": "🔊"}
-BUSY = ("preparing", "thinking", "speaking")
+ICONS = {"idle": "🗣", "preparing": "⏳", "thinking": "💭", "speaking": "🔊", "paused": "⏸"}
 FLASH_SECONDS = 4
 
 
@@ -29,6 +28,10 @@ class SusurroApp(rumps.App):
         self.settings = config.load()
         self.player = Player()
         self.hud = HUD(on_click=self.player.stop)
+        self.panel = PlayerPanel(PanelActions(
+            toggle_pause=self.player.toggle_pause, skip=self.player.skip, stop=self.player.stop,
+            seek=self.player.seek, set_setting=self._set_from_panel,
+            toggle_section=self._toggle_section))
         self._hud_state: tuple[str, bool] | None = None
         self._flash: tuple[str, float] | None = None  # (text, until) for short notices
         self.status_item: rumps.MenuItem | None = None
@@ -121,6 +124,7 @@ class SusurroApp(rumps.App):
             setattr(self.settings, k, v)
         config.save(self.settings)
         self._build_menu()
+        self.player.update(self.settings)  # the running job picks the change up live
         self._prewarm()
 
     def _prewarm(self) -> None:
@@ -134,6 +138,39 @@ class SusurroApp(rumps.App):
         self.settings.voices[self.settings.engine][lang] = voice
         config.save(self.settings)
         self._build_menu()
+        self.player.update(self.settings)
+
+    def _speech_language(self) -> str:
+        """Language whose voice the panel offers: the job's, else the likely next one."""
+        s = self.settings
+        return self.player.language or (s.language if s.language != "auto" else s.ui_language)
+
+    def _set_from_panel(self, name: str, value) -> None:
+        if name == "voice":
+            self._set_voice(self._speech_language(), str(value))
+            return
+        kind = type(getattr(self.settings, name))  # popups hand back NSString/NSNumber
+        self._set(**{name: kind(value)})
+
+    def _toggle_section(self, name: str) -> None:
+        attr = f"panel_{name}"
+        setattr(self.settings, attr, not getattr(self.settings, attr))
+        config.save(self.settings)
+
+    def _panel_settings(self) -> dict:
+        s, tr = self.settings, self._tr
+        lang = self._speech_language()
+        return {
+            "mode": (tr("short.mode"), {m: tr(f"mode.{m}") for m in MODES}, s.mode),
+            "speed": (tr("short.speed"), {x: f"{x:g}×" for x in SPEEDS}, s.speed),
+            "minutes": (tr("short.minutes"), {m: f"~{m} min" for m in MINUTES}, s.minutes),
+            "language": (tr("short.language"), {"auto": tr("lang.auto"), **LANGUAGE_NAMES},
+                         s.language),
+            "engine": (tr("short.engine"), {e: tr(f"engine.{e}") for e in ENGINES}, s.engine),
+            "voice": (tr("short.voice"),
+                      {v: label for v, (label, _) in VOICES[s.engine][lang].items()},
+                      s.voice(lang)),
+        }
 
     def _set_hotkey(self, spec: str) -> None:
         self.hotkey.stop()
@@ -228,15 +265,23 @@ class SusurroApp(rumps.App):
         self.status_item.title = self._status_label(st)
 
     def _update_hud(self, st: str) -> None:
-        flash = self._flash
-        if st in ("preparing", "thinking"):
-            state = (self._status_label(st), True)
-        elif st == "speaking":
-            state = (f"🔊  {self._status_label(st)} · {self._tr('click_stop')}", False)
-        elif flash and flash[1] > time.monotonic():
-            state = (flash[0], False)
-        else:
-            state = None
+        flash = self._flash if self._flash and self._flash[1] > time.monotonic() else None
+        progress = self.player.progress()
+        if progress is not None:  # a job is running: the player panel shows everything
+            self._show_hud(None)
+            if flash:
+                text = flash[0]
+            elif st.startswith("error"):
+                text = "⚠️  " + st.removeprefix("error: ")
+            else:
+                text = self._status_label(st)
+            self.panel.show(text, st in ("preparing", "thinking"), progress.paused,
+                            self._panel_settings(), self.settings.panel_settings)
+            return
+        self.panel.hide()
+        self._show_hud((flash[0], False) if flash else None)
+
+    def _show_hud(self, state: tuple[str, bool] | None) -> None:
         if state == self._hud_state:
             return
         self._hud_state = state
@@ -244,7 +289,6 @@ class SusurroApp(rumps.App):
             self.hud.show(*state)
         else:
             self.hud.hide()
-
 
 def run() -> None:
     atexit.register(writer.shutdown)  # don't leave the warm Claude process behind

@@ -127,6 +127,8 @@ class Settings:
     minutes: int = 3
     # System-wide shortcut that speaks the current selection (changeable from the menu).
     hotkey: str = DEFAULT_HOTKEY
+    # Player panel sections shown while speaking.
+    panel_settings: bool = False
 
     def voice(self, lang: str) -> str:
         return self.voices.get(self.engine, {}).get(lang) or DEFAULT_VOICES[self.engine][lang]
