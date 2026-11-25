@@ -3,11 +3,15 @@
 macOS Services hotkeys only fire in apps that hand selected text to Services (many
 terminals and Electron apps don't). Instead, the menu bar app installs a keyboard event
 tap: when the hotkey is pressed, the tap swallows it (so the front app never sees it, e.g.
-⌃S won't also reach the terminal), sends ⌘C to the front app, reads the clipboard, and puts the
-previous clipboard content back.
+⌃S won't also reach the terminal) and grabs the selection, trying in order:
 
-The event tap and sending ⌘C both need the Accessibility permission
-(System Settings → Privacy & Security → Accessibility).
+1. Accessibility: the focused element's selected text. No clipboard involved.
+2. The app's own Copy menu item, pressed through Accessibility: the same action as a real
+   ⌘C, for apps that ignore a synthetic keystroke.
+3. A synthetic ⌘C, for apps with no usable menu (Warp…).
+
+2 and 3 read the clipboard and put its previous content back. All of it needs the
+Accessibility permission (System Settings → Privacy & Security → Accessibility).
 """
 
 from __future__ import annotations
@@ -18,7 +22,24 @@ import time
 from collections.abc import Callable
 
 from AppKit import NSPasteboard, NSPasteboardTypeString
-from ApplicationServices import AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt
+from ApplicationServices import (
+    AXIsProcessTrustedWithOptions,
+    AXUIElementCopyAttributeValue,
+    AXUIElementCreateApplication,
+    AXUIElementPerformAction,
+    AXUIElementSetAttributeValue,
+    AXUIElementSetMessagingTimeout,
+    kAXChildrenAttribute,
+    kAXEnabledAttribute,
+    kAXErrorSuccess,
+    kAXFocusedUIElementAttribute,
+    kAXMenuBarAttribute,
+    kAXMenuItemCmdCharAttribute,
+    kAXMenuItemCmdModifiersAttribute,
+    kAXPressAction,
+    kAXSelectedTextAttribute,
+    kAXTrustedCheckOptionPrompt,
+)
 from Quartz import (
     CFMachPortCreateRunLoopSource,
     CFMachPortInvalidate,
@@ -126,9 +147,12 @@ def _send_copy() -> None:
         CGEventPost(kCGHIDEventTap, ev)
 
 
-def _front_app() -> str:
+def _front_app():
     from AppKit import NSWorkspace
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    return NSWorkspace.sharedWorkspace().frontmostApplication()
+
+
+def _app_name(app) -> str:
     return str(app.bundleIdentifier()) if app else "?"
 
 
@@ -151,23 +175,89 @@ def wait_for_release(keycode: int, timeout: float = 2.0) -> bool:
     return False
 
 
-def copy_selection(timeout: float = 1.0) -> str:
-    """Copy the front app's selection and return it, restoring the clipboard afterwards."""
-    pb = NSPasteboard.generalPasteboard()
-    before = pb.changeCount()
-    saved = pb.stringForType_(NSPasteboardTypeString)
-    _send_copy()
+# ---------------------------------------------------------------- Accessibility
+
+_AX_TIMEOUT = 0.3  # seconds; an app that doesn't answer must not stall the hotkey
+_electron_enabled: set[int] = set()
+
+
+def _ax(element, attribute: str):
+    err, value = AXUIElementCopyAttributeValue(element, attribute, None)
+    return value if err == kAXErrorSuccess else None
+
+
+def _ax_app(pid: int):
+    app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, _AX_TIMEOUT)
+    # Electron (Slack, VS Code…) only builds its accessibility tree when asked to. The tree
+    # appears asynchronously, so the first request in a fresh app may still miss it.
+    if pid not in _electron_enabled:
+        AXUIElementSetAttributeValue(app, "AXManualAccessibility", True)
+        _electron_enabled.add(pid)
+    return app
+
+
+def _ax_selected_text(app) -> str:
+    focused = _ax(app, kAXFocusedUIElementAttribute)
+    text = _ax(focused, kAXSelectedTextAttribute) if focused is not None else None
+    return str(text) if text else ""
+
+
+def _ax_copy_item(app):
+    """The app's 'Copy' menu item: the one bound to plain ⌘C, whatever the UI language."""
+    bar = _ax(app, kAXMenuBarAttribute)
+    for top in (_ax(bar, kAXChildrenAttribute) or []) if bar is not None else []:
+        for menu in _ax(top, kAXChildrenAttribute) or []:
+            for item in _ax(menu, kAXChildrenAttribute) or []:
+                if (str(_ax(item, kAXMenuItemCmdCharAttribute) or "").lower() == "c"
+                        and _ax(item, kAXMenuItemCmdModifiersAttribute) == 0):  # 0 = ⌘ only
+                    return item
+    return None
+
+
+# ---------------------------------------------------------------- grabbing
+
+
+def _wait_change(pb, before: int, timeout: float) -> bool:
     deadline = time.monotonic() + timeout
     while pb.changeCount() == before and time.monotonic() < deadline:
         time.sleep(0.005)
-    if pb.changeCount() == before:
-        _log(f"⌘C ignored by {_front_app()} (clipboard unchanged after {timeout}s)")
-        return ""  # nothing selected, or the app ignored ⌘C
+    return pb.changeCount() != before
+
+
+def copy_selection(timeout: float = 1.0) -> str:
+    """Return the front app's selection ("" if none), leaving the clipboard as it was."""
+    front = _front_app()
+    name = _app_name(front)
+    app = _ax_app(front.processIdentifier()) if front else None
+    if app is not None:
+        text = _ax_selected_text(app)
+        if text.strip():
+            _log(f"read {len(text)} chars from {name} (accessibility)")
+            return text
+
+    pb = NSPasteboard.generalPasteboard()
+    before = pb.changeCount()
+    saved = pb.stringForType_(NSPasteboardTypeString)
+    how = ""
+    item = _ax_copy_item(app) if app is not None else None
+    if item is not None and _ax(item, kAXEnabledAttribute) is not False:
+        AXUIElementPerformAction(item, kAXPressAction)
+        if _wait_change(pb, before, timeout / 2):
+            how = "Copy menu"
+    if not how:
+        _send_copy()
+        if _wait_change(pb, before, timeout):
+            how = "⌘C"
+    if not how:
+        _log(f"nothing copied from {name} (no accessible selection, Copy menu "
+             f"{'found' if item is not None else 'not found'}, ⌘C ignored)")
+        return ""  # nothing selected, or the app ignores every way of copying
     text = pb.stringForType_(NSPasteboardTypeString) or ""
     if saved is not None:
         pb.clearContents()
         pb.setString_forType_(saved, NSPasteboardTypeString)
-    _log(f"copied {len(text)} chars from {_front_app()}")
+    _log(f"copied {len(text)} chars from {name} ({how})")
     return str(text)
 
 
