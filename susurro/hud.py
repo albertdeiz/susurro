@@ -17,24 +17,33 @@ from AppKit import (
     NSColor,
     NSControlSizeSmall,
     NSEvent,
+    NSBackgroundColorAttributeName,
     NSBox,
     NSFont,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
     NSImage,
     NSImageOnly,
     NSImageView,
     NSLineBreakByTruncatingTail,
     NSMakeRect,
+    NSMutableAttributedString,
+    NSMutableParagraphStyle,
     NSPanel,
+    NSParagraphStyleAttributeName,
     NSPopUpButton,
     NSProgressIndicator,
     NSProgressIndicatorStyleSpinning,
     NSScreen,
+    NSScrollView,
     NSSlider,
     NSStatusWindowLevel,
     NSTextField,
+    NSTextView,
     NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectMaterialHUDWindow,
     NSVisualEffectStateActive,
+    NSViewWidthSizable,
     NSView,
     NSVisualEffectView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -148,11 +157,95 @@ class HUD:
             self._seek.setMaxValue_(max(n, 1))
         self._seek.setDoubleValue_(progress.index + progress.position)
 
+    # ------------------------------------------------------------ transcript
+
+    def _update_transcript(self, progress) -> None:
+        lines = progress.lines
+        storage = self._text.textStorage()
+        if lines[:len(self._lines_shown)] != self._lines_shown:  # a new job: start over
+            storage.setAttributedString_(NSMutableAttributedString.alloc().init())
+            self._lines_shown, self._ranges, self._marked = [], [], None
+        if len(lines) > len(self._lines_shown):
+            podcast = progress.mode == "podcast"
+            storage.beginEditing()
+            for speaker, line in lines[len(self._lines_shown):]:
+                if storage.length():
+                    self._append(storage, "\n", NSColor.tertiaryLabelColor())
+                if podcast:
+                    self._append(storage, f"{speaker}  ", NSColor.controlAccentColor(), bold=True)
+                self._ranges.append((storage.length(), len(line)))
+                self._append(storage, line, NSColor.tertiaryLabelColor())
+            storage.endEditing()
+            self._lines_shown = list(lines)
+            self._marked = None  # restyle below
+        marked = (progress.index, progress.word)
+        if marked == self._marked:
+            return
+        previous, self._marked = self._marked, marked
+        storage.beginEditing()
+        if previous is not None and previous[0] < len(self._ranges):
+            self._style_line(storage, previous[0], progress.index)
+        else:
+            for i in range(len(self._ranges)):
+                self._style_line(storage, i, progress.index)
+        if progress.index < len(self._ranges):
+            self._style_line(storage, progress.index, progress.index)
+            start, _ = self._ranges[progress.index]
+            if progress.word:
+                a, b = progress.word
+                storage.addAttribute_value_range_(
+                    NSBackgroundColorAttributeName,
+                    NSColor.controlAccentColor().colorWithAlphaComponent_(0.45), (start + a, b - a))
+        storage.endEditing()
+        if previous is None or previous[0] != progress.index:
+            if progress.index < len(self._ranges):
+                self._scroll_to(self._ranges[progress.index])
+
+    def _scroll_to(self, char_range: tuple[int, int]) -> None:
+        """Bring a line to about a third of the way down, so what comes next is visible."""
+        lm, tc = self._text.layoutManager(), self._text.textContainer()
+        glyphs, _ = lm.glyphRangeForCharacterRange_actualCharacterRange_(char_range, None)
+        rect = lm.boundingRectForGlyphRange_inTextContainer_(glyphs, tc)
+        lm.ensureLayoutForTextContainer_(tc)
+        content = lm.usedRectForTextContainer_(tc).size.height + 4
+        y = min(rect.origin.y - TRANSCRIPT_H / 3, content - TRANSCRIPT_H)
+        clip = self._scroll.contentView()
+        clip.scrollToPoint_((0, max(0.0, y)))
+        self._scroll.reflectScrolledClipView_(clip)
+
+    def _append(self, storage, text: str, color, bold: bool = False) -> None:
+        font = NSFont.systemFontOfSize_weight_(14, 0.4 if bold else 0)
+        attrs = {NSFontAttributeName: font, NSForegroundColorAttributeName: color,
+                 NSParagraphStyleAttributeName: self._para}
+        storage.appendAttributedString_(
+            NSMutableAttributedString.alloc().initWithString_attributes_(text, attrs))
+
+    def _style_line(self, storage, i: int, current: int) -> None:
+        if i < current:
+            color = NSColor.secondaryLabelColor()
+        elif i == current:
+            color = NSColor.labelColor()
+        else:
+            color = NSColor.tertiaryLabelColor()
+        r = self._ranges[i]
+        storage.addAttribute_value_range_(NSForegroundColorAttributeName, color, r)
+        storage.removeAttribute_range_(NSBackgroundColorAttributeName, r)
+
+    def _clicked_text(self, char: int) -> None:
+        for i, (start, length) in enumerate(self._ranges):
+            if char <= start + length:
+                offset = max(0, char - start)
+                self.actions.seek(i + min(offset / max(length, 1), 0.99))
+                return
+
     def hide(self) -> None:
         if self._visible:
             self._spinner.stopAnimation_(None)
             self._panel.orderOut_(None)
             self._visible = False
+            self._lines_shown, self._ranges, self._marked = [], [], None
+            self._text.textStorage().setAttributedString_(
+                NSMutableAttributedString.alloc().init())
 
     @staticmethod
     def _screen():
@@ -171,6 +264,7 @@ PANEL_PAD = 12
 ROW = 28  # transport row
 SEEK_ROW = 20
 COUNTER_W = 64
+TRANSCRIPT_H = 160
 SETTING_ROW = 46  # one row of setting tiles
 TILE_GAP = 8
 ROW_GAP = 6
@@ -204,6 +298,20 @@ class _Slider(NSSlider):
             objc.super(_Slider, self).mouseDown_(event)  # returns on mouse up
         finally:
             self.tracking = False
+
+
+class _TranscriptView(NSTextView):
+    """Read-only transcript; a click jumps playback to the clicked word."""
+
+    on_click: Callable[[int], None] | None = None
+
+    def acceptsFirstMouse_(self, event) -> bool:
+        return True
+
+    def mouseDown_(self, event) -> None:
+        point = self.convertPoint_fromView_(event.locationInWindow(), None)
+        if self.on_click:
+            self.on_click(self.characterIndexForInsertionAtPoint_(point))
 
 
 class _PanelView(NSVisualEffectView):
@@ -285,6 +393,8 @@ class PlayerPanel:
         self._stop = self._button("stop.fill", lambda _: actions.stop())
         self._gear = self._button("slider.horizontal.3",
                                   lambda _: actions.toggle_section("settings"))
+        self._quote = self._button("text.quote",
+                                   lambda _: actions.toggle_section("transcript"))
         self._spinner = NSProgressIndicator.alloc().initWithFrame_(
             NSMakeRect(0, 0, SPINNER, SPINNER))
         self._spinner.setStyle_(NSProgressIndicatorStyleSpinning)
@@ -313,6 +423,32 @@ class PlayerPanel:
         self._counter.setTextColor_(NSColor.secondaryLabelColor())
         self._counter.setAlignment_(2)  # right
         view.addSubview_(self._counter)
+
+        # Karaoke transcript: every line so far; the one playing bright, its word marked.
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, TRANSCRIPT_H))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setAutohidesScrollers_(True)
+        scroll.setDrawsBackground_(False)
+        scroll.setBorderType_(0)
+        text = _TranscriptView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, TRANSCRIPT_H))
+        text.setDrawsBackground_(False)
+        text.setEditable_(False)
+        text.setSelectable_(False)
+        text.setVerticallyResizable_(True)
+        text.setHorizontallyResizable_(False)
+        text.setAutoresizingMask_(NSViewWidthSizable)
+        text.textContainer().setWidthTracksTextView_(True)
+        text.setTextContainerInset_((2, 4))
+        text.on_click = self._clicked_text
+        scroll.setDocumentView_(text)
+        view.addSubview_(scroll)
+        self._scroll, self._text = scroll, text
+        self._ranges: list[tuple[int, int]] = []  # (start, length) of each line's text
+        self._lines_shown: list[tuple[str, str]] = []
+        self._marked: tuple[int, tuple[int, int] | None] | None = None  # (line, word)
+        para = NSMutableParagraphStyle.alloc().init()
+        para.setParagraphSpacing_(6)
+        self._para = para
 
         # Live settings: a grid of tiles (icon, caption, value), filled by _fill_settings.
         self._separator = NSBox.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 1))
@@ -351,6 +487,7 @@ class PlayerPanel:
         self._visible = False
         self._placed_at = None  # origin we put it at; a different one means the user moved it
         self._show_settings = False
+        self._show_transcript = False
         self._settings_key = None
         self._height = 0
 
@@ -390,6 +527,8 @@ class PlayerPanel:
 
     def _layout(self) -> None:
         rows = [ROW, SEEK_ROW]
+        if self._show_transcript:
+            rows.append(TRANSCRIPT_H)
         if self._show_settings:
             rows.append(1)  # separator
             rows += [SETTING_ROW] * ((len(self._setting_names) + COLUMNS - 1) // COLUMNS)
@@ -407,6 +546,8 @@ class PlayerPanel:
             x += SPINNER + GAP
         right = PANEL_WIDTH - PANEL_PAD - ROW
         self._gear.setFrame_(NSMakeRect(right, y, ROW, ROW))
+        right -= ROW + 2
+        self._quote.setFrame_(NSMakeRect(right, y, ROW, ROW))
         lh = self._status.fittingSize().height
         self._status.setFrame_(NSMakeRect(x, y + (ROW - lh) / 2, right - GAP - x, lh))
 
@@ -415,6 +556,12 @@ class PlayerPanel:
         self._seek.setFrame_(NSMakeRect(PANEL_PAD, y, right - GAP - PANEL_PAD, SEEK_ROW))
         lh = self._counter.fittingSize().height
         self._counter.setFrame_(NSMakeRect(right, y + (SEEK_ROW - lh) / 2, COUNTER_W, lh))
+
+        self._scroll.setHidden_(not self._show_transcript)
+        if self._show_transcript:
+            y -= ROW_GAP + TRANSCRIPT_H
+            self._scroll.setFrame_(NSMakeRect(PANEL_PAD, y, PANEL_WIDTH - 2 * PANEL_PAD,
+                                              TRANSCRIPT_H))
 
         self._separator.setHidden_(not self._show_settings)
         for tile in self._tiles.values():
@@ -458,11 +605,15 @@ class PlayerPanel:
     # ------------------------------------------------------------ API
 
     def show(self, status: str, spinning: bool, progress,
-             settings: dict[str, tuple[str, dict, object]], show_settings: bool) -> None:
+             settings: dict[str, tuple[str, dict, object]], show_settings: bool,
+             show_transcript: bool) -> None:
         """progress: player.Progress. settings: see _fill_settings, rebuilt only on change."""
         relayout = False
         paused = progress.paused
         self._update_seek(progress)
+        if show_transcript != self._show_transcript:
+            self._show_transcript = show_transcript
+            relayout = True
         if self._status.stringValue() != status:
             self._status.setStringValue_(status)
         if spinning == self._spinner.isHidden():
@@ -480,7 +631,8 @@ class PlayerPanel:
         if show_settings != self._show_settings:
             self._show_settings = show_settings
             relayout = True
-        self._gear.setContentTintColor_(NSColor.controlAccentColor() if show_settings
+        for button, on in ((self._gear, show_settings), (self._quote, show_transcript)):
+            button.setContentTintColor_(NSColor.controlAccentColor() if on
                                         else NSColor.secondaryLabelColor())
         if relayout or not self._height:
             self._layout()
@@ -491,6 +643,8 @@ class PlayerPanel:
             self._place()
             self._panel.orderFrontRegardless()
             self._visible = True
+        if show_transcript:  # after the layout: scrolling needs the final text width
+            self._update_transcript(progress)
 
     def _update_seek(self, progress) -> None:
         n = len(progress.lines)
@@ -504,8 +658,92 @@ class PlayerPanel:
             self._seek.setMaxValue_(max(n, 1))
         self._seek.setDoubleValue_(progress.index + progress.position)
 
+    # ------------------------------------------------------------ transcript
+
+    def _update_transcript(self, progress) -> None:
+        lines = progress.lines
+        storage = self._text.textStorage()
+        if lines[:len(self._lines_shown)] != self._lines_shown:  # a new job: start over
+            storage.setAttributedString_(NSMutableAttributedString.alloc().init())
+            self._lines_shown, self._ranges, self._marked = [], [], None
+        if len(lines) > len(self._lines_shown):
+            podcast = progress.mode == "podcast"
+            storage.beginEditing()
+            for speaker, line in lines[len(self._lines_shown):]:
+                if storage.length():
+                    self._append(storage, "\n", NSColor.tertiaryLabelColor())
+                if podcast:
+                    self._append(storage, f"{speaker}  ", NSColor.controlAccentColor(), bold=True)
+                self._ranges.append((storage.length(), len(line)))
+                self._append(storage, line, NSColor.tertiaryLabelColor())
+            storage.endEditing()
+            self._lines_shown = list(lines)
+            self._marked = None  # restyle below
+        marked = (progress.index, progress.word)
+        if marked == self._marked:
+            return
+        previous, self._marked = self._marked, marked
+        storage.beginEditing()
+        if previous is not None and previous[0] < len(self._ranges):
+            self._style_line(storage, previous[0], progress.index)
+        else:
+            for i in range(len(self._ranges)):
+                self._style_line(storage, i, progress.index)
+        if progress.index < len(self._ranges):
+            self._style_line(storage, progress.index, progress.index)
+            start, _ = self._ranges[progress.index]
+            if progress.word:
+                a, b = progress.word
+                storage.addAttribute_value_range_(
+                    NSBackgroundColorAttributeName,
+                    NSColor.controlAccentColor().colorWithAlphaComponent_(0.45), (start + a, b - a))
+        storage.endEditing()
+        if previous is None or previous[0] != progress.index:
+            if progress.index < len(self._ranges):
+                self._scroll_to(self._ranges[progress.index])
+
+    def _scroll_to(self, char_range: tuple[int, int]) -> None:
+        """Bring a line to about a third of the way down, so what comes next is visible."""
+        lm, tc = self._text.layoutManager(), self._text.textContainer()
+        glyphs, _ = lm.glyphRangeForCharacterRange_actualCharacterRange_(char_range, None)
+        rect = lm.boundingRectForGlyphRange_inTextContainer_(glyphs, tc)
+        lm.ensureLayoutForTextContainer_(tc)
+        content = lm.usedRectForTextContainer_(tc).size.height + 4
+        y = min(rect.origin.y - TRANSCRIPT_H / 3, content - TRANSCRIPT_H)
+        clip = self._scroll.contentView()
+        clip.scrollToPoint_((0, max(0.0, y)))
+        self._scroll.reflectScrolledClipView_(clip)
+
+    def _append(self, storage, text: str, color, bold: bool = False) -> None:
+        font = NSFont.systemFontOfSize_weight_(14, 0.4 if bold else 0)
+        attrs = {NSFontAttributeName: font, NSForegroundColorAttributeName: color,
+                 NSParagraphStyleAttributeName: self._para}
+        storage.appendAttributedString_(
+            NSMutableAttributedString.alloc().initWithString_attributes_(text, attrs))
+
+    def _style_line(self, storage, i: int, current: int) -> None:
+        if i < current:
+            color = NSColor.secondaryLabelColor()
+        elif i == current:
+            color = NSColor.labelColor()
+        else:
+            color = NSColor.tertiaryLabelColor()
+        r = self._ranges[i]
+        storage.addAttribute_value_range_(NSForegroundColorAttributeName, color, r)
+        storage.removeAttribute_range_(NSBackgroundColorAttributeName, r)
+
+    def _clicked_text(self, char: int) -> None:
+        for i, (start, length) in enumerate(self._ranges):
+            if char <= start + length:
+                offset = max(0, char - start)
+                self.actions.seek(i + min(offset / max(length, 1), 0.99))
+                return
+
     def hide(self) -> None:
         if self._visible:
             self._spinner.stopAnimation_(None)
             self._panel.orderOut_(None)
             self._visible = False
+            self._lines_shown, self._ranges, self._marked = [], [], None
+            self._text.textStorage().setAttributedString_(
+                NSMutableAttributedString.alloc().init())

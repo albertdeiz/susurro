@@ -12,7 +12,9 @@ A new `speak` cancels the previous job; `stop` cuts the audio immediately.
 
 from __future__ import annotations
 
+import bisect
 import copy
+import re
 import subprocess
 import threading
 import time
@@ -66,6 +68,7 @@ class Progress:
     written: bool  # the whole script is in (Claude has finished)
     paused: bool
     mode: str
+    word: tuple[int, int] | None  # (start, end) of the word being said in the current line
 
 
 class Job:
@@ -80,6 +83,7 @@ class Job:
         self.position = 0.0
         self.gen = 0  # bumped by seeks and voice changes: interrupts the line playing
         self.paused = False
+        self.word: tuple[int, int] | None = None
 
 
 class Player:
@@ -153,7 +157,7 @@ class Player:
             # Past the last line ends the job once the script is complete.
             pos = max(0.0, min(pos, float(n) if job.written else n - 1e-6))
             job.index, job.offset = int(pos), pos - int(pos)
-            job.position = job.offset
+            job.position, job.word = job.offset, None
             job.gen += 1
             self._schedule(job)
             job.cond.notify_all()
@@ -196,7 +200,8 @@ class Player:
             return None
         with job.cond:
             return Progress([(ln.speaker, ln.text) for ln in job.lines], job.index,
-                            job.position, job.written, job.paused, job.settings.mode)
+                            job.position, job.written, job.paused, job.settings.mode,
+                            job.word)
 
     @property
     def busy(self) -> bool:
@@ -254,14 +259,15 @@ class Player:
                     if job.cancel.is_set() or job.index >= len(job.lines):
                         break  # stopped, or the end of the script
                     self._schedule(job)
-                    gen, fut = job.gen, job.lines[job.index].audio
-                audio = self._wait(job, fut, gen)
+                    gen, line = job.gen, job.lines[job.index]
+                audio = self._wait(job, line.audio, gen)
                 if audio is not None:
-                    self._play(job, audio, gen)
+                    self._play(job, audio, line.text, gen)
                 with job.cond:
                     if job.gen == gen:  # finished (or failed): on to the next line
                         job.index += 1
                         job.offset = job.position = 0.0
+                        job.word = None
         finally:
             with job.cond:
                 job.cancel.set()  # no more scheduling for this job
@@ -286,7 +292,7 @@ class Player:
                 return None
         return None
 
-    def _play(self, job: Job, audio: tts.Audio, gen: int) -> None:
+    def _play(self, job: Job, audio: tts.Audio, text: str, gen: int) -> None:
         """Play one line until it ends, honouring pause, seeks and cancel."""
         from AppKit import NSSound
 
@@ -295,6 +301,8 @@ class Player:
             self._fail(job, f"can't play {audio.path.name}")
             return
         duration = sound.duration() or 0.001
+        words = audio.words or _estimate_words(text, duration)
+        starts = [w[0] for w in words]
         played = job.offset * duration
         started = paused = False
         last = time.monotonic()
@@ -328,6 +336,8 @@ class Player:
                     if played >= duration:
                         break
                     job.position = min(played / duration, 1.0)
+                    i = bisect.bisect_right(starts, played) - 1
+                    job.word = words[i][1:] if i >= 0 else None
                 last = now
                 time.sleep(TICK)
         finally:
@@ -338,6 +348,12 @@ class Player:
             return
         self.status = f"error: {msg}"
         chime(CHIME_ERROR)
+
+
+def _estimate_words(text: str, duration: float) -> list[tuple[float, int, int]]:
+    """Word timings for voices that don't report them: proportional to the characters."""
+    n = len(text) or 1
+    return [(duration * m.start() / n, m.start(), m.end()) for m in re.finditer(r"\S+", text)]
 
 
 def _discard(item: object) -> None:

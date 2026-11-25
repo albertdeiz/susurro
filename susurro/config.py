@@ -129,6 +129,7 @@ class Settings:
     hotkey: str = DEFAULT_HOTKEY
     # Player panel sections shown while speaking.
     panel_settings: bool = False
+    panel_transcript: bool = True
 
     def voice(self, lang: str) -> str:
         return self.voices.get(self.engine, {}).get(lang) or DEFAULT_VOICES[self.engine][lang]

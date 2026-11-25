@@ -276,7 +276,8 @@ class SusurroApp(rumps.App):
             else:
                 text = self._status_label(st)
             self.panel.show(text, st in ("preparing", "thinking"), progress,
-                            self._panel_settings(), self.settings.panel_settings)
+                            self._panel_settings(), self.settings.panel_settings,
+                            self.settings.panel_transcript)
             return
         self.panel.hide()
         self._show_hud((flash[0], False) if flash else None)
