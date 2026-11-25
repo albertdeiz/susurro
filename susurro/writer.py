@@ -99,8 +99,30 @@ def _system_prompt(mode: str, detail: str, lang: str) -> str:
     )
 
 
-def _user_prompt(text: str, detail: str) -> str:
-    return f"<text>\n{text}\n</text>\n\nAbout {target_words(text, detail)} words at most."
+def _translate_prompt(lang: str) -> str:
+    return (
+        "You translate texts that will be read aloud. Translate the text faithfully: keep "
+        "every idea, its order and its tone; don't summarize, explain or add anything. Write "
+        "one paragraph per line, splitting long paragraphs into lines of two or three "
+        "sentences.\n\n" + _common(lang)
+    )
+
+
+def needs_claude(mode: str, source: str, lang: str) -> bool:
+    """Whether a request is written by Claude: narrate, podcast, or reading in translation."""
+    return mode != "read" or source != lang
+
+
+def _system(s: Settings, source: str, lang: str) -> str:
+    if s.mode == "read":
+        return _translate_prompt(lang)
+    return _system_prompt(s.mode, s.detail, lang)
+
+
+def _user_prompt(text: str, s: Settings) -> str:
+    if s.mode == "read":  # a translation: as long as it takes
+        return f"<text>\n{text}\n</text>"
+    return f"<text>\n{text}\n</text>\n\nAbout {target_words(text, s.detail)} words at most."
 
 
 # ---------------------------------------------------------------- read mode
@@ -185,7 +207,7 @@ def _stream_api(s: Settings, system: str, text: str, cancel: threading.Event) ->
             output_config={"effort": "low"},  # low latency: this is rewriting, not reasoning
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
-            messages=[{"role": "user", "content": _user_prompt(text, s.detail)}],
+            messages=[{"role": "user", "content": _user_prompt(text, s)}],
         ) as stream:
             for delta in stream.text_stream:
                 if cancel.is_set():
@@ -283,13 +305,13 @@ class _Warm:
 _warm = _Warm()
 
 
-def prewarm(s: Settings, lang: str) -> None:
-    """Start Claude ahead for the next narrate/podcast request in `lang`; stop it otherwise."""
+def prewarm(s: Settings, source: str, lang: str) -> None:
+    """Start Claude ahead for the next request if it needs Claude; stop it otherwise."""
     exe = _claude_cli()
-    if s.mode == "read" or backend_name() != "cli" or not exe:
+    if not needs_claude(s.mode, source, lang) or backend_name() != "cli" or not exe:
         _warm.close()
         return
-    _warm.prepare(_cli_command(exe, s.model, _system_prompt(s.mode, s.detail, lang)))
+    _warm.prepare(_cli_command(exe, s.model, _system(s, source, lang)))
 
 
 def shutdown() -> None:
@@ -302,7 +324,7 @@ def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) ->
         raise WriterError("No ANTHROPIC_API_KEY and no `claude` CLI; set up one of them.")
     proc = _warm.take(_cli_command(exe, s.model, system))
     assert proc.stdin and proc.stdout
-    content = _user_prompt(text, s.detail)
+    content = _user_prompt(text, s)
     message = {"type": "user", "message": {"role": "user", "content": content}}
     try:
         proc.stdin.write(json.dumps(message) + "\n")
@@ -349,13 +371,15 @@ def backend_name() -> str:
 # ---------------------------------------------------------------- public API
 
 
-def write(text: str, s: Settings, lang: str, cancel: threading.Event) -> Iterator[Utterance]:
+def write(text: str, s: Settings, source: str, lang: str,
+          cancel: threading.Event) -> Iterator[Utterance]:
+    """The script for `text` (written in `source`), to be spoken in `lang`."""
     text = text.strip()
     if not text:
         return
-    if s.mode == "read":
+    if not needs_claude(s.mode, source, lang):
         yield from _chunks_for_reading(text)
         return
-    system = _system_prompt(s.mode, s.detail, lang)
+    system = _system(s, source, lang)
     stream = _stream_api if backend_name() == "api" else _stream_cli
     yield from _lines_to_utterances(stream(s, system, text, cancel), s.mode)

@@ -10,10 +10,12 @@ Select text in any Mac app, press **⌃S**, and listen to it, in Spanish, Englis
 
 ## Languages
 
-- **Speech language** can be *Auto* or fixed to Español, English or Português.
-  - *Auto* detects the language from the selected text.
-  - A fixed language makes Claude narrate in it, translating if needed. In *Read as is* mode
-    there is no translation: the text is just read with that language's voice.
+- **Language** has two settings, each Español, English or Português:
+  - *Text language* (input): *Detect* guesses it from the selected text; fix it when the
+    guess is wrong, for example with very short or mixed-language selections.
+  - *Speech language* (output): *Same as the text*, or a fixed language. When it differs from
+    the text's, Claude translates, also in *Read as is* mode (a faithful translation, read in
+    full).
 - **Voices** are chosen per language. In podcast mode, host B uses the partner of the voice you
   picked, for example Paola ↔ Sebastián or Ava ↔ Andrew.
 - **Interface language** (the menu bar app) can be Español, English or Português. By default it
@@ -38,14 +40,15 @@ selection ──⌃S──▶ menu bar app (reads it through Accessibility, or c
   - previous/next line, pause, stop, and a seek bar over the whole script with a line counter;
   - a karaoke transcript (the quote button shows or hides it): the line being read and its
     current word are highlighted; click any word to jump there;
-  - live settings (the sliders button): a grid of tiles for mode, speed, detail, language,
-    engine and voice. A new voice, engine or speed applies from the current point on; a new
-    mode, or a new detail level or language with Claude, rewrites the script from the start.
+  - live settings (the sliders button): a grid of tiles for mode, detail, speed, engine,
+    text language, speech language and voice. A new voice, engine or speed applies from the
+    current point on; a new mode, detail level or language that changes what Claude writes
+    rewrites the script from the start.
 
   Which sections are open is remembered (`panel_settings`, `panel_transcript` in the settings
   file).
 - **Menu bar:** an icon (🗣 ready · 💭 Claude writing · 🔊 speaking · ⏸ paused · ⚠️ error) with:
-  - mode, speed and speech language;
+  - mode, speed, and text and speech language;
   - voice engine and voice (one submenu per language);
   - detail: concise, summary, extended or in depth;
   - interface language;
@@ -112,4 +115,4 @@ uv run susurro uninstall
 - Local "Enhanced" and "Premium" voices sound far better than the basic ones. Install them from
   System Settings → Accessibility → Spoken Content → System voice → Manage voices.
 - Language detection is a simple word-frequency heuristic. For very short or mixed-language
-  selections, set the speech language by hand.
+  selections, set the text language by hand.

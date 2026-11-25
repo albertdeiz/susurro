@@ -118,7 +118,10 @@ class Settings:
     mode: str = "read"
     speed: float = 1.0
     engine: str = "edge"
-    # Speech language: "auto" (detected from the text) or one of LANGUAGES.
+    # Language of the selected text: "auto" (detected) or one of LANGUAGES.
+    input_language: str = "auto"
+    # Speech language: "auto" (the text's own) or one of LANGUAGES; if it differs from the
+    # text's, Claude translates (in read mode too).
     language: str = "auto"
     # Menu bar UI language.
     ui_language: str = field(default_factory=system_language)
@@ -161,6 +164,8 @@ class Settings:
             self.engine = "edge"
         if self.language not in ("auto", *LANGUAGES):
             self.language = "auto"
+        if self.input_language not in ("auto", *LANGUAGES):
+            self.input_language = "auto"
         if self.ui_language not in LANGUAGES:
             self.ui_language = "en"
         merged = _default_voices()

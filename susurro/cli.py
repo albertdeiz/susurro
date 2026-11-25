@@ -44,7 +44,8 @@ def cmd_speak(args: argparse.Namespace) -> int:
     if not text.strip():
         print("No text.", file=sys.stderr)
         return 1
-    params = {k: v for k, v in (("mode", args.mode), ("lang", args.lang)) if v}
+    params = {k: v for k, v in (("mode", args.mode), ("lang", args.lang),
+                                            ("from", args.source)) if v}
     q = "?" + urllib.parse.urlencode(params) if params else ""
     if _post(f"/speak{q}", text.encode()) is not None:
         return 0
@@ -56,6 +57,8 @@ def cmd_speak(args: argparse.Namespace) -> int:
         s = replace(s, mode=args.mode)
     if args.lang:
         s = replace(s, language=args.lang)
+    if args.source:
+        s = replace(s, input_language=args.source)
     p = Player()
     p.speak(text, s)
     try:
@@ -299,6 +302,8 @@ def main() -> None:
     sp.add_argument("text", nargs="*")
     sp.add_argument("--mode", choices=list(MODES))
     sp.add_argument("--lang", choices=["auto", *LANGUAGES], help="speech language")
+    sp.add_argument("--from", dest="source", choices=["auto", *LANGUAGES],
+                    help="language of the text (default: detected)")
     sub.add_parser("stop", help="stop the audio")
     sub.add_parser("status", help="app status")
     sub.add_parser("install", help="start at login + right-click Services entry")

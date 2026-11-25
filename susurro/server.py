@@ -1,6 +1,6 @@
 """Local HTTP service (127.0.0.1) that receives text from the shortcut and hands it to the player.
 
-POST /speak   body = UTF-8 text (optional ?mode=read|narrate|podcast&lang=auto|es|en|pt)
+POST /speak   body = UTF-8 text (optional ?mode=read|narrate|podcast&lang=…&from=auto|es|en|pt)
 POST /stop
 GET  /status
 """
@@ -59,6 +59,9 @@ def serve(player: Player, get_settings: Callable[[], Settings]) -> ThreadingHTTP
                 s = replace(s, mode=mode)
             if lang in ("auto", *LANGUAGES):
                 s = replace(s, language=lang)
+            source = query.get("from", [None])[0]
+            if source in ("auto", *LANGUAGES):
+                s = replace(s, input_language=source)
             player.speak(text, s)
             self._reply(200, {"ok": True, "mode": s.mode, "chars": len(text)})
 

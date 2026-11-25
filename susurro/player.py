@@ -36,18 +36,28 @@ def chime(path: str) -> None:
     subprocess.Popen(["afplay", "-v", "0.4", path], stderr=subprocess.DEVNULL)
 
 
-def resolve_language(text: str, s: Settings) -> str:
-    """Speech language: the fixed one from settings, or detected from the text."""
-    if s.language != "auto":
-        return s.language
-    return i18n.detect(text, fallback=s.ui_language)
+def resolve_languages(text: str, s: Settings) -> tuple[str, str]:
+    """(language of the text, speech language): fixed in settings, else detected / the same."""
+    source = s.input_language
+    if source == "auto":
+        source = i18n.detect(text, fallback=s.ui_language)
+    return source, s.language if s.language != "auto" else source
 
 
-def needs_rewrite(old: Settings, new: Settings) -> bool:
+def needs_rewrite(job: "Job", new: Settings) -> bool:
     """Whether a settings change needs a new script (Claude again), not just new audio."""
+    old = job.settings
     if new.mode != old.mode:
         return True
-    return new.mode != "read" and (new.detail, new.language) != (old.detail, old.language)
+    source, lang = resolve_languages(job.text, new)
+    before = writer.needs_claude(old.mode, job.source, job.lang)
+    after = writer.needs_claude(new.mode, source, lang)
+    if before != after:
+        return True
+    if not after:
+        return False  # read as is either way: only the voice may change
+    return (lang, new.detail if new.mode != "read" else "") != \
+        (job.lang, old.detail if old.mode != "read" else "")
 
 
 @dataclass
@@ -72,8 +82,9 @@ class Progress:
 
 
 class Job:
-    def __init__(self, text: str, settings: Settings, lang: str) -> None:
-        self.text, self.settings, self.lang = text, settings, lang
+    def __init__(self, text: str, settings: Settings, source: str, lang: str) -> None:
+        self.text, self.settings = text, settings
+        self.source, self.lang = source, lang  # language of the text, and of the speech
         self.cancel = threading.Event()
         self.cond = threading.Condition()
         self.lines: list[Line] = []
@@ -91,7 +102,8 @@ class Player:
         self._lock = threading.Lock()
         self._job: Job | None = None
         self.status = "idle"  # idle | preparing | thinking | speaking | paused | error: …
-        self.language = ""  # language of the current/last job
+        self.language = ""  # speech language of the current/last job
+        self.source = ""  # language of its text
         self.last_text = ""
 
     # ------------------------------------------------------------ API
@@ -102,13 +114,13 @@ class Player:
             return
         self.stop()
         s = copy.deepcopy(settings)  # changes reach the job only through `update`
-        lang = resolve_language(text, s)
-        job = Job(text, s, lang)
+        source, lang = resolve_languages(text, s)
+        job = Job(text, s, source, lang)
         with self._lock:
             self._job = job
         self.last_text = text
-        self.language = lang
-        self.status = "preparing" if s.mode == "read" else "thinking"
+        self.source, self.language = source, lang
+        self.status = "thinking" if writer.needs_claude(s.mode, source, lang) else "preparing"
         chime(CHIME_START)
         threading.Thread(target=self._produce, args=(job,), daemon=True).start()
         threading.Thread(target=self._consume, args=(job,), daemon=True).start()
@@ -177,12 +189,13 @@ class Player:
         if not job:
             return
         s = copy.deepcopy(settings)
-        if needs_rewrite(job.settings, s):
+        if needs_rewrite(job, s):
             self.speak(job.text, s)
             return
         with job.cond:
-            job.settings, job.lang = s, resolve_language(job.text, s)
-            self.language = job.lang
+            job.settings = s
+            job.source, job.lang = resolve_languages(job.text, s)
+            self.source, self.language = job.source, job.lang
             current = job.lines[job.index] if job.index < len(job.lines) else None
             if current is not None and current.key and current.key != self._key(job, current):
                 job.offset = job.position  # replay the current line from where it was
@@ -231,7 +244,8 @@ class Player:
 
     def _produce(self, job: Job) -> None:
         try:
-            for u in writer.write(job.text, job.settings, job.lang, job.cancel):
+            for u in writer.write(job.text, job.settings, job.source, job.lang,
+                                   job.cancel):
                 if job.cancel.is_set():
                     break
                 if not tts.speakable(u.text):

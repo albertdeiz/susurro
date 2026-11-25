@@ -87,7 +87,11 @@ class SusurroApp(rumps.App):
             sub.add(second)
             voice_menu.add(sub)
 
-        speech_langs = {"auto": tr("lang.auto"), **LANGUAGE_NAMES}
+        language = rumps.MenuItem(tr("language"))
+        language.add(self._submenu("lang.input", self._input_langs(), s.input_language,
+                                   lambda v: self._set(input_language=v)))
+        language.add(self._submenu("lang.output", self._output_langs(), s.language,
+                                   lambda v: self._set(language=v)))
         backend = tr(f"backend.{writer.backend_name()}")
 
         shortcut = rumps.MenuItem(f"{tr('shortcut')}: {hotkey.pretty(s.hotkey)}")
@@ -114,8 +118,7 @@ class SusurroApp(rumps.App):
                           lambda v: self._set(mode=v)),
             self._submenu("speed", {x: f"{x:g}×" for x in SPEEDS}, s.speed,
                           lambda v: self._set(speed=v)),
-            self._submenu("speech_language", speech_langs, s.language,
-                          lambda v: self._set(language=v)),
+            language,
             self._submenu("engine", {e: tr(f"engine.{e}") for e in ENGINES}, s.engine,
                           lambda v: self._set(engine=v)),
             voice_menu,
@@ -136,11 +139,25 @@ class SusurroApp(rumps.App):
         self.player.update(self.settings)  # the running job picks the change up live
         self._prewarm()
 
-    def _prewarm(self) -> None:
-        """Start Claude ahead in the language the next request most likely needs."""
+    def _input_langs(self) -> dict:
+        return {"auto": self._tr("lang.detect"), **LANGUAGE_NAMES}
+
+    def _output_langs(self) -> dict:
+        return {"auto": self._tr("lang.same"), **LANGUAGE_NAMES}
+
+    def _likely_languages(self) -> tuple[str, str]:
+        """(text, speech) languages of the current job, else the likely next request's."""
+        if self.player.language:
+            return self.player.source, self.player.language
         s = self.settings
-        lang = s.language if s.language != "auto" else (self.player.language or s.ui_language)
-        threading.Thread(target=writer.prewarm, args=(s, lang), daemon=True).start()
+        source = s.input_language if s.input_language != "auto" else s.ui_language
+        return source, s.language if s.language != "auto" else source
+
+    def _prewarm(self) -> None:
+        """Start Claude ahead in the languages the next request most likely needs."""
+        s = self.settings
+        source, lang = self._likely_languages()
+        threading.Thread(target=writer.prewarm, args=(s, source, lang), daemon=True).start()
         self.player.warm_up(s, lang)
 
     def _set_voice(self, lang: str, voice: str) -> None:
@@ -162,8 +179,7 @@ class SusurroApp(rumps.App):
 
     def _speech_language(self) -> str:
         """Language whose voice the panel offers: the job's, else the likely next one."""
-        s = self.settings
-        return self.player.language or (s.language if s.language != "auto" else s.ui_language)
+        return self._likely_languages()[1]
 
     def _set_from_panel(self, name: str, value) -> None:
         if name == "voice":
@@ -184,8 +200,8 @@ class SusurroApp(rumps.App):
             "mode": (tr("short.mode"), {m: tr(f"mode.{m}") for m in MODES}, s.mode),
             "speed": (tr("short.speed"), {x: f"{x:g}×" for x in SPEEDS}, s.speed),
             "detail": (tr("short.detail"), {d: tr(f"detail.{d}") for d in DETAILS}, s.detail),
-            "language": (tr("short.language"), {"auto": tr("lang.auto"), **LANGUAGE_NAMES},
-                         s.language),
+            "input_language": (tr("short.input"), self._input_langs(), s.input_language),
+            "language": (tr("short.output"), self._output_langs(), s.language),
             "engine": (tr("short.engine"), {e: tr(f"engine.{e}") for e in ENGINES}, s.engine),
             "voice": (tr("short.voice"),
                       {v: label for v, (label, _) in VOICES[s.engine][lang].items()},
@@ -269,8 +285,10 @@ class SusurroApp(rumps.App):
 
     def _status_label(self, st: str) -> str:
         label = self._tr(st if st in ICONS else "idle")
-        if st != "idle" and self.player.language:
-            label += f"  ({self.player.language.upper()})"
+        p = self.player
+        if st != "idle" and p.language:
+            langs = p.language if p.source == p.language else f"{p.source}→{p.language}"
+            label += f"  ({langs.upper()})"
         return label
 
     def _update_menu_bar(self, st: str) -> None:
