@@ -1,17 +1,23 @@
-"""Pipeline: script (Claude or the text as is) → per-line synthesis → queued playback.
+"""Pipeline: script (Claude or the text as is) → per-line synthesis → playback, line by line.
 
-Lines are synthesized ahead, several at a time (the TTS service has a long latency tail), and
-played in order: the audio queue holds futures, so the player waits only for the next line.
-A new `speak` cancels the previous one; `stop` cuts the audio immediately.
+The job keeps every line of the script, so playback can pause, jump back or forward, and
+pick up setting changes while it runs. Lines are synthesized ahead, several at a time (the
+TTS service has a long latency tail): each line from the one playing up to PREFETCH ahead
+has its synthesis running on the shared pool, so the player only waits for the next line.
+Audio already played is kept until the job ends, so jumping back is instant.
+
+Audio plays in-process through NSSound, which can pause, seek and report its position.
+A new `speak` cancels the previous job; `stop` cuts the audio immediately.
 """
 
 from __future__ import annotations
 
 import copy
-import queue
 import subprocess
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import i18n, tts, writer
@@ -22,8 +28,8 @@ CHIME_ERROR = "/System/Library/Sounds/Basso.aiff"
 PREFETCH = 3  # lines synthesized concurrently ahead of playback
 # Shared by all jobs so worker threads (and the local voices loaded in them) stay warm.
 _POOL = ThreadPoolExecutor(max_workers=PREFETCH, thread_name_prefix="tts")
-
-_DONE = object()
+TICK = 0.02  # how often playback checks for pause, seek and the end of a line
+RESTART_LINE = 0.15  # "previous" past this fraction of a line restarts it instead
 
 
 def chime(path: str) -> None:
@@ -37,18 +43,52 @@ def resolve_language(text: str, s: Settings) -> str:
     return i18n.detect(text, fallback=s.ui_language)
 
 
+def needs_rewrite(old: Settings, new: Settings) -> bool:
+    """Whether a settings change needs a new script (Claude again), not just new audio."""
+    if new.mode != old.mode:
+        return True
+    return new.mode != "read" and (new.minutes, new.language) != (old.minutes, old.language)
+
+
+@dataclass
+class Line:
+    speaker: str  # "A" or "B"
+    text: str
+    audio: Future | None = None  # Future[Path]
+    key: tuple = ()  # (engine, voice, speed) the audio was made with
+
+
+@dataclass
+class Progress:
+    """What the player panel shows; a copy, safe to read from any thread."""
+
+    lines: list[tuple[str, str]]  # (speaker, text)
+    index: int  # line being played
+    position: float  # fraction of that line already played
+    written: bool  # the whole script is in (Claude has finished)
+    paused: bool
+    mode: str
+
+
 class Job:
-    def __init__(self) -> None:
+    def __init__(self, text: str, settings: Settings, lang: str) -> None:
+        self.text, self.settings, self.lang = text, settings, lang
         self.cancel = threading.Event()
-        self.audio: queue.Queue = queue.Queue(maxsize=PREFETCH)  # Future[Path] | _DONE
-        self.proc: subprocess.Popen | None = None
+        self.cond = threading.Condition()
+        self.lines: list[Line] = []
+        self.written = False
+        self.index = 0
+        self.offset = 0.0  # fraction of the line to start from (after a seek)
+        self.position = 0.0
+        self.gen = 0  # bumped by seeks and voice changes: interrupts the line playing
+        self.paused = False
 
 
 class Player:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: Job | None = None
-        self.status = "idle"  # idle | preparing | thinking | speaking | error: …
+        self.status = "idle"  # idle | preparing | thinking | speaking | paused | error: …
         self.language = ""  # language of the current/last job
         self.last_text = ""
 
@@ -59,16 +99,16 @@ class Player:
         if not text:
             return
         self.stop()
-        job = Job()
+        s = copy.deepcopy(settings)  # changes reach the job only through `update`
+        lang = resolve_language(text, s)
+        job = Job(text, s, lang)
         with self._lock:
             self._job = job
         self.last_text = text
-        s = copy.deepcopy(settings)  # later settings changes don't affect this job
-        lang = resolve_language(text, s)
         self.language = lang
         self.status = "preparing" if s.mode == "read" else "thinking"
         chime(CHIME_START)
-        threading.Thread(target=self._produce, args=(job, text, s, lang), daemon=True).start()
+        threading.Thread(target=self._produce, args=(job,), daemon=True).start()
         threading.Thread(target=self._consume, args=(job,), daemon=True).start()
 
     def warm_up(self, s: Settings, lang: str) -> None:
@@ -93,11 +133,72 @@ class Player:
         with self._lock:
             job, self._job = self._job, None
         if job:
-            job.cancel.set()
-            if job.proc and job.proc.poll() is None:
-                job.proc.terminate()
-            _drain(job.audio)
+            job.cancel.set()  # the consumer stops the sound and deletes the audio
+            with job.cond:
+                job.cond.notify_all()
         self.status = "idle"
+
+    def toggle_pause(self) -> None:
+        job = self._job
+        if job:
+            job.paused = not job.paused
+
+    def seek(self, pos: float) -> None:
+        """Jump to line int(pos), a fraction pos % 1 into it."""
+        job = self._job
+        if not job:
+            return
+        with job.cond:
+            n = len(job.lines)
+            if not n:
+                return
+            # Past the last line ends the job once the script is complete.
+            pos = max(0.0, min(pos, float(n) if job.written else n - 1e-6))
+            job.index, job.offset = int(pos), pos - int(pos)
+            job.position = job.offset
+            job.gen += 1
+            self._schedule(job)
+            job.cond.notify_all()
+
+    def skip(self, delta: int) -> None:
+        """Next/previous line. Previous restarts the current line if it's well under way."""
+        job = self._job
+        if not job:
+            return
+        if delta < 0 and job.position > RESTART_LINE:
+            delta = 0
+        self.seek(job.index + delta)
+
+    def update(self, settings: Settings) -> None:
+        """Apply settings changed during playback: new audio, or a new script if needed."""
+        job = self._job
+        if not job:
+            return
+        s = copy.deepcopy(settings)
+        if needs_rewrite(job.settings, s):
+            self.speak(job.text, s)
+            return
+        with job.cond:
+            job.settings, job.lang = s, resolve_language(job.text, s)
+            self.language = job.lang
+            current = job.lines[job.index] if job.index < len(job.lines) else None
+            if current is not None and current.key and current.key != self._key(job, current):
+                job.offset = job.position  # replay the current line from where it was
+                job.gen += 1
+            for line in job.lines:  # audio made with the old voice is no use any more
+                if line.audio is not None and line.key != self._key(job, line):
+                    _discard(line.audio)
+                    line.audio, line.key = None, ()
+            self._schedule(job)
+            job.cond.notify_all()
+
+    def progress(self) -> Progress | None:
+        job = self._job
+        if not job:
+            return None
+        with job.cond:
+            return Progress([(ln.speaker, ln.text) for ln in job.lines], job.index,
+                            job.position, job.written, job.paused, job.settings.mode)
 
     @property
     def busy(self) -> bool:
@@ -105,48 +206,134 @@ class Player:
 
     # ------------------------------------------------------------ threads
 
-    def _produce(self, job: Job, text: str, s: Settings, lang: str) -> None:
-        voices = {"A": s.voice(lang), "B": s.partner_voice(lang)}
+    @staticmethod
+    def _key(job: Job, line: Line) -> tuple:
+        s = job.settings
+        voice = s.partner_voice(job.lang) if line.speaker == "B" else s.voice(job.lang)
+        return (s.engine, voice, s.speed)
+
+    def _schedule(self, job: Job) -> None:
+        """Start synthesis of the line playing and the next PREFETCH. Hold job.cond."""
+        if job.cancel.is_set():
+            return
+        for line in job.lines[job.index:job.index + PREFETCH + 1]:
+            key = self._key(job, line)
+            if line.audio is not None and line.key == key:
+                continue
+            if line.audio is not None:
+                _discard(line.audio)
+            engine, voice, speed = key
+            line.key = key
+            line.audio = _POOL.submit(tts.synthesize, engine, line.text, voice, speed)
+
+    def _produce(self, job: Job) -> None:
         try:
-            for u in writer.write(text, s, lang, job.cancel):
+            for u in writer.write(job.text, job.settings, job.lang, job.cancel):
                 if job.cancel.is_set():
                     break
                 if not tts.speakable(u.text):
                     continue
-                voice = voices.get(u.speaker, voices["A"])
-                _put(job, _POOL.submit(tts.synthesize, s.engine, u.text, voice, s.speed))
+                with job.cond:
+                    job.lines.append(Line(u.speaker, u.text))
+                    self._schedule(job)
+                    job.cond.notify_all()
         except writer.WriterError as e:
             self._fail(job, str(e))
         except Exception as e:  # never leave the app stuck in "thinking"
             self._fail(job, f"{type(e).__name__}: {e}")
         finally:
-            _put(job, _DONE)
+            with job.cond:
+                job.written = True
+                job.cond.notify_all()
 
     def _consume(self, job: Job) -> None:
-        while not job.cancel.is_set():
+        try:
+            while not job.cancel.is_set():
+                with job.cond:
+                    while (job.index >= len(job.lines) and not job.written
+                           and not job.cancel.is_set()):
+                        job.cond.wait(0.2)
+                    if job.cancel.is_set() or job.index >= len(job.lines):
+                        break  # stopped, or the end of the script
+                    self._schedule(job)
+                    gen, fut = job.gen, job.lines[job.index].audio
+                path = self._wait(job, fut, gen)
+                if path is not None:
+                    self._play(job, path, gen)
+                with job.cond:
+                    if job.gen == gen:  # finished (or failed): on to the next line
+                        job.index += 1
+                        job.offset = job.position = 0.0
+        finally:
+            with job.cond:
+                job.cancel.set()  # no more scheduling for this job
+                for line in job.lines:
+                    if line.audio is not None:
+                        _discard(line.audio)
+            with self._lock:
+                if self._job is job:
+                    self._job = None
+                    if not self.status.startswith("error"):
+                        self.status = "idle"
+
+    def _wait(self, job: Job, fut: Future, gen: int) -> Path | None:
+        """The line's audio; None if it failed, or if cancelled or interrupted by a seek."""
+        while not job.cancel.is_set() and job.gen == gen:
             try:
-                item = job.audio.get(timeout=0.2)
-            except queue.Empty:
+                return fut.result(timeout=0.05)
+            except TimeoutError:
                 continue
-            if item is _DONE:
-                break
-            path = _result(job, item, lambda msg: self._fail(job, msg))
-            if path is None:
-                if job.cancel.is_set():
-                    break
-                continue  # this line failed (already reported); try the next one
-            if job.cancel.is_set():
-                path.unlink(missing_ok=True)
-                break
-            self.status = "speaking"
-            job.proc = subprocess.Popen(["afplay", str(path)])
-            job.proc.wait()
-            path.unlink(missing_ok=True)
-        with self._lock:
-            if self._job is job:
-                self._job = None
-                if not self.status.startswith("error"):
-                    self.status = "idle"
+            except Exception as e:
+                self._fail(job, str(e))
+                return None
+        return None
+
+    def _play(self, job: Job, path: Path, gen: int) -> None:
+        """Play one line until it ends, honouring pause, seeks and cancel."""
+        from AppKit import NSSound
+
+        sound = NSSound.alloc().initWithContentsOfFile_byReference_(str(path), False)
+        if sound is None:
+            self._fail(job, f"can't play {path.name}")
+            return
+        duration = sound.duration() or 0.001
+        played = job.offset * duration
+        started = paused = False
+        last = time.monotonic()
+        try:
+            while not job.cancel.is_set() and job.gen == gen:
+                now = time.monotonic()
+                if job.paused:
+                    if started and not paused:
+                        sound.pause()
+                    paused = True
+                    self.status = "paused"
+                elif not started:
+                    sound.play()
+                    if played:
+                        sound.setCurrentTime_(played)
+                    started, paused = True, False
+                    self.status = "speaking"
+                elif paused:
+                    sound.resume()
+                    paused = False
+                    self.status = "speaking"
+                else:
+                    played += now - last
+                    # NSSound gives no end-of-sound callback off the main thread: track the
+                    # time played, and notice it rewinding to 0 when it ends.
+                    current = sound.currentTime()
+                    if current > 0:
+                        played = current
+                    elif played > 0.25:
+                        break
+                    if played >= duration:
+                        break
+                    job.position = min(played / duration, 1.0)
+                last = now
+                time.sleep(TICK)
+        finally:
+            sound.stop()
 
     def _fail(self, job: Job, msg: str) -> None:
         if job.cancel.is_set():
@@ -163,38 +350,3 @@ def _discard(item: object) -> None:
         item.result().unlink(missing_ok=True)
     elif not item.done():
         item.add_done_callback(_discard)
-
-
-def _result(job: Job, fut: Future, on_error) -> Path | None:
-    """Wait for a line's audio, waking up to honour cancel. None if it failed or was cancelled."""
-    while not job.cancel.is_set():
-        try:
-            return fut.result(timeout=0.1)
-        except TimeoutError:
-            continue
-        except Exception as e:
-            on_error(str(e))
-            return None
-    _discard(fut)
-    return None
-
-
-def _put(job: Job, item: object) -> None:
-    while True:
-        if job.cancel.is_set():
-            _discard(item)
-            return
-        try:
-            job.audio.put(item, timeout=0.2)
-            return
-        except queue.Full:
-            continue
-
-
-def _drain(q: queue.Queue) -> None:
-    while True:
-        try:
-            item = q.get_nowait()
-        except queue.Empty:
-            return
-        _discard(item)
