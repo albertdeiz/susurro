@@ -22,7 +22,7 @@ Select text in any Mac app, press **⌃S**, and listen to it, in Spanish, Englis
 ## How it works
 
 ```
-selection ──⌃S──▶ menu bar app (sends ⌘C, reads the clipboard, restores it)
+selection ──⌃S──▶ menu bar app (reads it through Accessibility, or copies it and restores the clipboard)
                                           │
                  (or right-click → Services → "Susurro: Speak selection" ──HTTP──▶ 127.0.0.1:47823)
                                           │
@@ -30,10 +30,21 @@ selection ──⌃S──▶ menu bar app (sends ⌘C, reads the clipboard, res
                                           │
                    tts.py     (Edge neural or local macOS voices, one line at a time)
                                           │
-                   player.py  (queue: one line plays while the next is synthesized)
+                   player.py  (one line plays while the next ones are synthesized; pause/seek)
 ```
 
-- **UI:** a menu bar icon (🗣 ready · 💭 Claude writing · 🔊 speaking · ⚠️ error) with:
+- **Player:** while it speaks, a floating panel shows up (it never takes focus from your app;
+  drag it anywhere):
+  - previous/next line, pause, stop, and a seek bar over the whole script with a line counter;
+  - a karaoke transcript (the quote button shows or hides it): the line being read and its
+    current word are highlighted; click any word to jump there;
+  - live settings (the sliders button): a grid of tiles for mode, speed, length, language,
+    engine and voice. A new voice, engine or speed applies from the current point on; a new
+    mode, or a new length or language with Claude, rewrites the script from the start.
+
+  Which sections are open is remembered (`panel_settings`, `panel_transcript` in the settings
+  file).
+- **Menu bar:** an icon (🗣 ready · 💭 Claude writing · 🔊 speaking · ⏸ paused · ⚠️ error) with:
   - mode, speed and speech language;
   - voice engine and voice (one submenu per language);
   - length;
@@ -57,8 +68,8 @@ uv run susurro install     # starts at login (LaunchAgent) + right-click Service
 ```
 
 The first time, macOS asks to allow **Accessibility** for Susurro's Python (System Settings →
-Privacy & Security → Accessibility). The shortcut needs it to catch ⌃S and to send ⌘C to the
-front app. Until it's granted, the menu shows a "⚠️ Allow Accessibility…" item.
+Privacy & Security → Accessibility). The shortcut needs it to catch ⌃S and to read the selection
+from the front app. Until it's granted, the menu shows a "⚠️ Allow Accessibility…" item.
 
 ## Shortcut
 
@@ -72,7 +83,9 @@ that means terminal flow control (XOFF) and shell forward history search (`⌃S`
 stop working; pick another combination if you rely on them.
 
 Why not a macOS Services shortcut: Services only receive the selection from apps that support
-them, and many terminals and Electron apps (Warp, VS Code, Slack…) don't. ⌘C works everywhere.
+them, and many terminals and Electron apps (Warp, VS Code, Slack…) don't. Susurro asks the app
+for the selected text through Accessibility; if the app doesn't expose it, it presses the app's
+own Edit → Copy, and as a last resort sends ⌘C.
 
 From the terminal:
 

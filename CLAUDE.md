@@ -32,14 +32,31 @@ uv run susurro stop | status
 - **No test suite yet.** Verify by importing the modules (`.venv/bin/python -c "import
   susurro.app"`), calling the pure functions (`i18n.detect`, `hotkey.validate`), and reading the
   log after a real run.
+- **Running a branch or worktree for real.** Started from a terminal, the app is not trusted
+  for Accessibility (the terminal is the responsible process), so the hotkey can't work. Stop
+  the installed agent and run the checkout as its own launchd job:
+  ```sh
+  launchctl bootout gui/$(id -u)/com.susurro.app
+  launchctl submit -l com.susurro.dev -o ~/Library/Logs/susurro-dev.log \
+    -e ~/Library/Logs/susurro-dev.log -- /bin/sh -c "cd $PWD && exec .venv/bin/python -m susurro app"
+  # reload: launchctl kickstart -k gui/$(id -u)/com.susurro.dev
+  # back:   launchctl remove com.susurro.dev
+  #         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.susurro.app.plist
+  ```
+- **Looking at the panels without screen recording:** build a `PlayerPanel`, call `show` with a
+  hand-made `player.Progress`, and render the content view to a PNG with
+  `bitmapImageRepForCachingDisplayInRect_` + `cacheDisplayInRect_toBitmapImageRep_` (`screencapture`
+  isn't allowed from the shell).
 
 ## Architecture
 
 ```
-hotkey.py   event tap catches the shortcut → sends ⌘C → reads and restores the clipboard
-app.py      rumps menu bar app: menus, settings, wires hotkey → player, drives the HUD
-hud.py      floating non-activating NSPanel (spinner / "speaking · click to stop" / errors)
-player.py   job per request: producer thread (writer → tts) and consumer thread (afplay)
+hotkey.py   event tap catches the shortcut → AX selected text, else Copy menu / ⌘C + clipboard
+app.py      rumps menu bar app: menus, settings, wires hotkey → player, drives the panels
+hud.py      non-activating NSPanels: player panel (transport, seek bar, karaoke transcript,
+            live settings as tiles)
+            while a job runs; status pill for notices otherwise
+player.py   job per request: producer thread (writer → lines) and consumer thread (NSSound)
 writer.py   Claude script generation: Anthropic SDK if ANTHROPIC_API_KEY/AUTH_TOKEN, else `claude -p`
 tts.py      edge-tts (online neural voices) or macOS voices via NSSpeechSynthesizer (offline)
 server.py   HTTP on 127.0.0.1:47823, used by the CLI and the Services entry
@@ -49,10 +66,10 @@ cli.py      argparse entry point, LaunchAgent and Services installers
 ```
 
 Latency design (measured; keep it):
-- `player._POOL` is one shared thread pool. Each line's synthesis is submitted to it and the
-  *future* goes into the audio queue, so up to `PREFETCH` lines are synthesized ahead and
-  played in order. The pool is shared so worker threads, and the local voices loaded in them,
-  stay warm between requests.
+- `player._POOL` is one shared thread pool. The job keeps every line with its synthesis
+  *future*; `Player._schedule` keeps the line playing and the next `PREFETCH` submitted, so
+  they are synthesized ahead and played in order. The pool is shared so worker threads, and
+  the local voices loaded in them, stay warm between requests.
 - Local voices run in-process with one `NSSpeechSynthesizer` per worker thread (~0.05 s a
   line, versus ~0.7 s spawning `say`). The voice only loads on its first synthesis, so
   `Player.warm_up` synthesizes a word in every worker at start-up.
@@ -62,18 +79,22 @@ Latency design (measured; keep it):
 - The first utterance from Claude is cut at its first sentence end, not the end of its line.
 - Edge latency is bimodal (~1 s or 5-15 s) and degrades for a long while after bursts of
   requests. Hedged (duplicate) requests were tried and didn't help: when it's slow, both are.
-- Benchmark without sound by replacing `afplay` with a stand-in that lasts as long as the
-  audio. `afplay` started from a sandboxed shell can hang because it has no audio device.
+- Benchmark or test without sound by wrapping `AppKit.NSSound` so each sound gets
+  `setVolume_(0)`; `player._play` imports it at call time.
 
 Player status is a plain string read by a 0.15 s `rumps.Timer` in `app.py`: `idle`, `preparing`,
-`thinking`, `speaking` or `error: …`. The hotkey callbacks run on a background thread, so they
-only set state; the timer is what touches AppKit.
+`thinking`, `speaking`, `paused` or `error: …`; `Player.progress()` gives the panel a copy of the
+lines, position and current word. The hotkey callbacks run on a background thread, so they only
+set state; the timer is what touches AppKit.
 
 ## Hard-won details (do not regress)
 
-- **Grabbing the selection** goes through a synthetic ⌘C, because macOS Services only see the
-  selection in apps that support them (not Warp, VS Code, Slack…). Two fixes in
-  `hotkey.py` matter:
+- **Grabbing the selection** doesn't use macOS Services, which only see the selection in apps
+  that support them (not Warp, VS Code, Slack…). `copy_selection` tries the focused element's
+  `AXSelectedText`, then presses the app's Copy menu item (found by its ⌘C key equivalent, so
+  it works in any UI language), then posts a synthetic ⌘C. Slack, Safari and Orca ignore the
+  synthetic ⌘C. Electron apps only expose their AX tree after `AXManualAccessibility` is set
+  on the app. For the synthetic ⌘C, two fixes matter:
   - Wait until the shortcut and all modifiers are **physically released** before posting ⌘C.
     Otherwise apps that read the hardware state see ⌃⌘C.
   - Set the event's character with `CGEventKeyboardSetUnicodeString(ev, 1, "c")`. A background
@@ -87,8 +108,11 @@ only set state; the timer is what touches AppKit.
   common words. Only then do spelling hints (ñ, ção, ll, nh…) split Spanish from Portuguese.
   Those hints also appear in English words (hello, will, enhance), so they must never count
   against English.
-- **The HUD** is a non-activating panel and must stay one: if it takes focus, ⌘C goes to
-  Susurro instead of the user's app. Dialogs (e.g. the custom shortcut prompt) call
+- **NSSound off the main thread** never reports the end of a sound (`isPlaying` stays true).
+  `_play` tracks the time played and treats `currentTime` rewinding to 0 as the end.
+- **The HUD and the player panel** are borderless non-activating panels and must stay so: if
+  one takes focus, the selection/⌘C goes to Susurro instead of the user's app. Their
+  controls override `acceptsFirstMouse_` so a click acts without activating anything. Dialogs (e.g. the custom shortcut prompt) call
   `NSApp.activateIgnoringOtherApps_(True)` first, because a menu bar app's windows open behind
   the others otherwise.
 - **Testing the hotkey from a script:** post ⌃Tab/⌃S with `CGEventPost` and read the log. Make
