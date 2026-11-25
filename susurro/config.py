@@ -15,7 +15,8 @@ LANGUAGE_NAMES = {"es": "Español", "en": "English", "pt": "Português"}
 
 MODES = ("read", "narrate", "podcast")
 SPEEDS = [0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0]
-MINUTES = [1, 3, 5, 10]
+# How much Claude writes in narrate / podcast, shortest first.
+DETAILS = ("concise", "summary", "extended", "deep")
 ENGINES = ("edge", "say")
 DEFAULT_HOTKEY = "ctrl+s"
 
@@ -127,8 +128,8 @@ class Settings:
     partners: dict[str, dict[str, str]] = field(default_factory=dict)
     # Claude model used for narrate / podcast.
     model: str = "claude-opus-5-5"
-    # Target length of narrate / podcast, in minutes.
-    minutes: int = 3
+    # How much Claude writes in narrate / podcast: one of DETAILS.
+    detail: str = "summary"
     # System-wide shortcut that speaks the current selection (changeable from the menu).
     hotkey: str = DEFAULT_HOTKEY
     # Player panel sections shown while speaking.
@@ -154,6 +155,8 @@ class Settings:
     def normalize(self) -> "Settings":
         if self.mode not in MODES:
             self.mode = {"leer": "read", "narrar": "narrate"}.get(self.mode, "read")
+        if self.detail not in DETAILS:
+            self.detail = "summary"
         if self.engine not in ENGINES:
             self.engine = "edge"
         if self.language not in ("auto", *LANGUAGES):
@@ -186,6 +189,11 @@ def load() -> Settings:
         data = json.loads(CONFIG_PATH.read_text())
         known = {k: v for k, v in data.items() if k in Settings.__dataclass_fields__}
         s = Settings(**known)
+        # v0.2 stored a target length in minutes.
+        if "detail" not in data and isinstance(data.get("minutes"), int):
+            m = data["minutes"]
+            s.detail = ("concise" if m <= 1 else "summary" if m <= 3
+                        else "extended" if m <= 5 else "deep")
         # v0.1 stored a single "voice", always from the Spanish catalog.
         legacy = data.get("voice")
         if legacy and "voices" not in data and legacy in VOICES.get(s.engine, {}).get("es", {}):

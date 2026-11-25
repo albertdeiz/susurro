@@ -269,7 +269,7 @@ SETTING_ROW = 46  # one row of setting tiles
 TILE_GAP = 8
 ROW_GAP = 6
 # Icon of each live setting's tile (SF Symbols).
-SETTING_ICONS = {"mode": "text.bubble", "speed": "speedometer", "minutes": "clock",
+SETTING_ICONS = {"mode": "text.bubble", "speed": "speedometer", "detail": "text.alignleft",
                  "language": "globe", "engine": "cpu", "voice": "person.wave.2"}
 COLUMNS = 3
 
@@ -454,7 +454,7 @@ class PlayerPanel:
         self._separator = NSBox.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 1))
         self._separator.setBoxType_(2)  # NSBoxSeparator
         view.addSubview_(self._separator)
-        self._setting_names = ("mode", "speed", "minutes", "language", "engine", "voice")
+        self._setting_names = ("mode", "speed", "detail", "language", "engine", "voice")
         self._tiles: dict[str, NSView] = {}
         self._labels: dict[str, NSTextField] = {}
         self._popups: dict[str, NSPopUpButton] = {}

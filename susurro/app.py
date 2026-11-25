@@ -1,4 +1,4 @@
-"""Minimal menu bar UI: mode, speed, languages, engine, voice, length and stop."""
+"""Minimal menu bar UI: mode, speed, languages, engine, voice, detail and stop."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import rumps
 from AppKit import NSApp
 
 from . import config, hotkey, writer
-from .config import ENGINES, LANGUAGE_NAMES, LANGUAGES, MINUTES, MODES, SPEEDS, VOICES
+from .config import DETAILS, ENGINES, LANGUAGE_NAMES, LANGUAGES, MODES, SPEEDS, VOICES
 from .i18n import t
 from .hud import HUD, PanelActions, PlayerPanel
 from .player import CHIME_ERROR, Player, chime
@@ -119,8 +119,8 @@ class SusurroApp(rumps.App):
             self._submenu("engine", {e: tr(f"engine.{e}") for e in ENGINES}, s.engine,
                           lambda v: self._set(engine=v)),
             voice_menu,
-            self._submenu("minutes", {m: f"~{m} min" for m in MINUTES}, s.minutes,
-                          lambda v: self._set(minutes=v)),
+            self._submenu("detail", {d: tr(f"detail.{d}") for d in DETAILS}, s.detail,
+                          lambda v: self._set(detail=v)),
             None,
             self._submenu("ui_language", LANGUAGE_NAMES, s.ui_language,
                           lambda v: self._set(ui_language=v)),
@@ -183,7 +183,7 @@ class SusurroApp(rumps.App):
         return {
             "mode": (tr("short.mode"), {m: tr(f"mode.{m}") for m in MODES}, s.mode),
             "speed": (tr("short.speed"), {x: f"{x:g}×" for x in SPEEDS}, s.speed),
-            "minutes": (tr("short.minutes"), {m: f"~{m} min" for m in MINUTES}, s.minutes),
+            "detail": (tr("short.detail"), {d: tr(f"detail.{d}") for d in DETAILS}, s.detail),
             "language": (tr("short.language"), {"auto": tr("lang.auto"), **LANGUAGE_NAMES},
                          s.language),
             "engine": (tr("short.engine"), {e: tr(f"engine.{e}") for e in ENGINES}, s.engine),

@@ -57,32 +57,50 @@ def _common(lang: str) -> str:
     )
 
 
-def _system_prompt(mode: str, minutes: int, lang: str) -> str:
-    words = max(60, minutes * 150)
+# What each detail level covers, and its word target: a fraction of the source text's
+# words, kept between a floor and a ceiling. The target depends on the text, so it goes in
+# the user message: the system prompt is sent ahead, before the text exists (see _Warm).
+_DETAIL = {
+    "concise": ("only the core idea, in a few sentences; leave out everything secondary",
+                0.15, 40, 150),
+    "summary": ("the main ideas and what matters most, leaving out minor details",
+                0.35, 80, 500),
+    "extended": ("every point of the text, with brief examples where they help",
+                 0.8, 150, 1200),
+    "deep": ("every point in depth: the context, the reasoning behind each idea, examples "
+             "and implications, while staying faithful to the text", 1.5, 250, 2500),
+}
+
+
+def target_words(text: str, detail: str) -> int:
+    _, ratio, floor, ceiling = _DETAIL.get(detail, _DETAIL["summary"])
+    return min(ceiling, max(floor, round(len(text.split()) * ratio)))
+
+
+def _system_prompt(mode: str, detail: str, lang: str) -> str:
+    cover = _DETAIL.get(detail, _DETAIL["summary"])[0]
+    length = f"Cover {cover}. Stay within the word count given with the text; never pad."
     if mode == "podcast":
         return (
             "You write scripts for a short explainer podcast with two hosts. "
             "A explains clearly and with enthusiasm; B is curious, asks what the listener "
             "would ask, reacts, and sometimes sums things up in their own words. They sound "
             "like two friends who know the topic, with light humor, never over the top. "
-            f"Length: at most about {minutes} minutes (about {words} words); if the text is "
-            "short, be much briefer. Open with a one-sentence hook, cover the important ideas "
-            "of the text without inventing facts, and close with one idea to take away.\n\n"
+            f"{length} Open with a one-sentence hook, don't invent facts, and close with one "
+            "idea to take away.\n\n"
             "Strict format: one turn per line, every line starts with 'A: ' or 'B: ', short "
             "turns (one to three sentences). Nothing outside those lines.\n\n" + _common(lang)
         )
     return (
         "You are an audio narrator. Turn the text into a warm spoken explanation that is easy "
-        "to follow without looking at a screen: the main idea first, then what matters, with "
-        "brief examples when they help. Don't invent facts. "
-        f"At most about {minutes} minutes (about {words} words); if the text is short, be "
-        "briefer. Write one short paragraph (two or three sentences) per line.\n\n"
-        + _common(lang)
+        "to follow without looking at a screen: the main idea first, then the rest. Don't "
+        f"invent facts. {length} Write one short paragraph (two or three sentences) per "
+        "line.\n\n" + _common(lang)
     )
 
 
-def _user_prompt(text: str) -> str:
-    return f"<text>\n{text}\n</text>"
+def _user_prompt(text: str, detail: str) -> str:
+    return f"<text>\n{text}\n</text>\n\nAbout {target_words(text, detail)} words at most."
 
 
 # ---------------------------------------------------------------- read mode
@@ -167,7 +185,7 @@ def _stream_api(s: Settings, system: str, text: str, cancel: threading.Event) ->
             output_config={"effort": "low"},  # low latency: this is rewriting, not reasoning
             betas=["server-side-fallback-2026-07-01"],
             fallbacks="default",
-            messages=[{"role": "user", "content": _user_prompt(text)}],
+            messages=[{"role": "user", "content": _user_prompt(text, s.detail)}],
         ) as stream:
             for delta in stream.text_stream:
                 if cancel.is_set():
@@ -271,7 +289,7 @@ def prewarm(s: Settings, lang: str) -> None:
     if s.mode == "read" or backend_name() != "cli" or not exe:
         _warm.close()
         return
-    _warm.prepare(_cli_command(exe, s.model, _system_prompt(s.mode, s.minutes, lang)))
+    _warm.prepare(_cli_command(exe, s.model, _system_prompt(s.mode, s.detail, lang)))
 
 
 def shutdown() -> None:
@@ -284,7 +302,8 @@ def _stream_cli(s: Settings, system: str, text: str, cancel: threading.Event) ->
         raise WriterError("No ANTHROPIC_API_KEY and no `claude` CLI; set up one of them.")
     proc = _warm.take(_cli_command(exe, s.model, system))
     assert proc.stdin and proc.stdout
-    message = {"type": "user", "message": {"role": "user", "content": _user_prompt(text)}}
+    content = _user_prompt(text, s.detail)
+    message = {"type": "user", "message": {"role": "user", "content": content}}
     try:
         proc.stdin.write(json.dumps(message) + "\n")
         proc.stdin.flush()
@@ -337,6 +356,6 @@ def write(text: str, s: Settings, lang: str, cancel: threading.Event) -> Iterato
     if s.mode == "read":
         yield from _chunks_for_reading(text)
         return
-    system = _system_prompt(s.mode, s.minutes, lang)
+    system = _system_prompt(s.mode, s.detail, lang)
     stream = _stream_api if backend_name() == "api" else _stream_cli
     yield from _lines_to_utterances(stream(s, system, text, cancel), s.mode)

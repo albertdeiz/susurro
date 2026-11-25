@@ -38,16 +38,16 @@ selection ──⌃S──▶ menu bar app (reads it through Accessibility, or c
   - previous/next line, pause, stop, and a seek bar over the whole script with a line counter;
   - a karaoke transcript (the quote button shows or hides it): the line being read and its
     current word are highlighted; click any word to jump there;
-  - live settings (the sliders button): a grid of tiles for mode, speed, length, language,
+  - live settings (the sliders button): a grid of tiles for mode, speed, detail, language,
     engine and voice. A new voice, engine or speed applies from the current point on; a new
-    mode, or a new length or language with Claude, rewrites the script from the start.
+    mode, or a new detail level or language with Claude, rewrites the script from the start.
 
   Which sections are open is remembered (`panel_settings`, `panel_transcript` in the settings
   file).
 - **Menu bar:** an icon (🗣 ready · 💭 Claude writing · 🔊 speaking · ⏸ paused · ⚠️ error) with:
   - mode, speed and speech language;
   - voice engine and voice (one submenu per language);
-  - length;
+  - detail: concise, summary, extended or in depth;
   - interface language;
   - stop and repeat.
 

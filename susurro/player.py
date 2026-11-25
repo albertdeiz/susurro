@@ -47,7 +47,7 @@ def needs_rewrite(old: Settings, new: Settings) -> bool:
     """Whether a settings change needs a new script (Claude again), not just new audio."""
     if new.mode != old.mode:
         return True
-    return new.mode != "read" and (new.minutes, new.language) != (old.minutes, old.language)
+    return new.mode != "read" and (new.detail, new.language) != (old.detail, old.language)
 
 
 @dataclass
