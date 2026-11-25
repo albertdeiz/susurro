@@ -1,5 +1,8 @@
 """Voice engines. Each one synthesizes one line into an audio file.
 
+Each line comes back with the time each word starts, for the karaoke transcript: real
+timings from Edge, none from macOS voices (the player estimates them).
+
 - edge: Microsoft Edge neural voices via `edge-tts`. Free, no API key, but online.
 - say:  macOS built-in voices, 100% local. Synthesized in-process with NSSpeechSynthesizer,
         one kept per worker thread: ~0.05 s per line instead of ~0.7 s for spawning `say`.
@@ -14,6 +17,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
@@ -22,6 +26,13 @@ TMP = Path(tempfile.gettempdir()) / "susurro"
 
 class TTSError(RuntimeError):
     pass
+
+
+@dataclass
+class Audio:
+    path: Path
+    # (start in seconds, first char, end char) of each word in the line; [] if unknown.
+    words: list[tuple[float, int, int]] = field(default_factory=list)
 
 
 def _out(suffix: str) -> Path:
@@ -33,15 +44,22 @@ def _out(suffix: str) -> Path:
     return Path(name)
 
 
-def _edge(text: str, voice: str, speed: float) -> Path:
+def _edge(text: str, voice: str, speed: float) -> Audio:
     import edge_tts
 
     pct = round((speed - 1.0) * 100)
     rate = f"{pct:+d}%"
     out = _out(".mp3")
+    boundaries: list[tuple[float, str]] = []
 
     async def run() -> None:
-        await edge_tts.Communicate(text, voice, rate=rate).save(str(out))
+        tts = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary")
+        with out.open("wb") as f:
+            async for chunk in tts.stream():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                elif chunk["type"] == "WordBoundary":
+                    boundaries.append((chunk["offset"] / 1e7, chunk["text"]))  # 100 ns units
 
     try:
         asyncio.run(run())
@@ -51,7 +69,19 @@ def _edge(text: str, voice: str, speed: float) -> Path:
     if out.stat().st_size == 0:
         out.unlink(missing_ok=True)
         raise TTSError("edge-tts returned empty audio (offline?)")
-    return out
+    return Audio(out, _locate(text, boundaries))
+
+
+def _locate(text: str, boundaries: list[tuple[float, str]]) -> list[tuple[float, int, int]]:
+    """Find each spoken word in the line, in order. Words not found are skipped."""
+    words, cursor = [], 0
+    for start, word in boundaries:
+        i = text.find(word, cursor)
+        if i < 0:
+            continue
+        words.append((start, i, i + len(word)))
+        cursor = i + len(word)
+    return words
 
 
 _local = threading.local()
@@ -117,11 +147,11 @@ def warm_up(engine: str, voice: str) -> None:
         _say_native("ok", voice, 1.0).unlink(missing_ok=True)
 
 
-def _say(text: str, voice: str, speed: float) -> Path:
+def _say(text: str, voice: str, speed: float) -> Audio:
     try:
-        return _say_native(text, voice, speed)
+        return Audio(_say_native(text, voice, speed))
     except Exception:
-        return _say_command(text, voice, speed)
+        return Audio(_say_command(text, voice, speed))
 
 
 def _say_command(text: str, voice: str, speed: float) -> Path:
@@ -146,7 +176,7 @@ def speakable(text: str) -> bool:
     return bool(re.search(r"\w", text))
 
 
-def synthesize(engine: str, text: str, voice: str, speed: float, retries: int = 1) -> Path:
+def synthesize(engine: str, text: str, voice: str, speed: float, retries: int = 1) -> Audio:
     for attempt in range(retries + 1):
         try:
             return ENGINES[engine](text, voice, speed)

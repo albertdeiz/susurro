@@ -18,8 +18,6 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from pathlib import Path
-
 from . import i18n, tts, writer
 from .config import Settings
 
@@ -54,7 +52,7 @@ def needs_rewrite(old: Settings, new: Settings) -> bool:
 class Line:
     speaker: str  # "A" or "B"
     text: str
-    audio: Future | None = None  # Future[Path]
+    audio: Future | None = None  # Future[tts.Audio]
     key: tuple = ()  # (engine, voice, speed) the audio was made with
 
 
@@ -257,9 +255,9 @@ class Player:
                         break  # stopped, or the end of the script
                     self._schedule(job)
                     gen, fut = job.gen, job.lines[job.index].audio
-                path = self._wait(job, fut, gen)
-                if path is not None:
-                    self._play(job, path, gen)
+                audio = self._wait(job, fut, gen)
+                if audio is not None:
+                    self._play(job, audio, gen)
                 with job.cond:
                     if job.gen == gen:  # finished (or failed): on to the next line
                         job.index += 1
@@ -276,7 +274,7 @@ class Player:
                     if not self.status.startswith("error"):
                         self.status = "idle"
 
-    def _wait(self, job: Job, fut: Future, gen: int) -> Path | None:
+    def _wait(self, job: Job, fut: Future, gen: int) -> tts.Audio | None:
         """The line's audio; None if it failed, or if cancelled or interrupted by a seek."""
         while not job.cancel.is_set() and job.gen == gen:
             try:
@@ -288,13 +286,13 @@ class Player:
                 return None
         return None
 
-    def _play(self, job: Job, path: Path, gen: int) -> None:
+    def _play(self, job: Job, audio: tts.Audio, gen: int) -> None:
         """Play one line until it ends, honouring pause, seeks and cancel."""
         from AppKit import NSSound
 
-        sound = NSSound.alloc().initWithContentsOfFile_byReference_(str(path), False)
+        sound = NSSound.alloc().initWithContentsOfFile_byReference_(str(audio.path), False)
         if sound is None:
-            self._fail(job, f"can't play {path.name}")
+            self._fail(job, f"can't play {audio.path.name}")
             return
         duration = sound.duration() or 0.001
         played = job.offset * duration
@@ -347,6 +345,6 @@ def _discard(item: object) -> None:
     if not isinstance(item, Future):
         return
     if not item.cancel() and item.done() and not item.exception():
-        item.result().unlink(missing_ok=True)
+        item.result().path.unlink(missing_ok=True)
     elif not item.done():
         item.add_done_callback(_discard)
