@@ -328,7 +328,8 @@ class Player:
                 if audio is not None:
                     self._play(job, audio, line.text, gen)
                 with job.cond:
-                    if job.gen == gen:  # finished (or failed): on to the next line
+                    # Finished (or failed): on to the next line. Not if stopped halfway.
+                    if job.gen == gen and not job.cancel.is_set():
                         job.index += 1
                         job.offset = job.position = 0.0
                         job.word = None
