@@ -29,7 +29,8 @@ class SusurroApp(rumps.App):
         self.player = Player()
         self.hud = HUD(on_click=self.player.stop)
         self.panel = PlayerPanel(PanelActions(
-            toggle_pause=self.player.toggle_pause, skip=self.player.skip, stop=self.player.stop,
+            toggle_pause=self.player.toggle_pause, skip=self.player.skip,
+            restart=lambda: self.player.seek(0),
             seek=self.player.seek, set_setting=self._set_from_panel,
             toggle_section=self._toggle_section, close=self.player.stop))
         self._hud_state: tuple[str, bool] | None = None

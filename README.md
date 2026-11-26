@@ -38,7 +38,8 @@ selection ──⌃S──▶ menu bar app (reads it through Accessibility, or c
 - **Player:** when it starts speaking, a floating panel shows up (it never takes focus from
   your app; drag it anywhere). It stays open after the speech ends, so you can replay it, until
   you close it with the ✕ in its top-left corner (shown on hover, and always once it's done):
-  - previous/next line, pause, stop, and a seek bar over the whole script with a line counter;
+  - previous/next line, pause, restart from the beginning (Claude keeps writing meanwhile),
+    and a seek bar over the whole script with a line counter;
   - a karaoke transcript (the quote button shows or hides it): the line being read and its
     current word are highlighted; click any word to jump there;
   - live settings (the sliders button): a grid of tiles for mode, detail, speed, engine,

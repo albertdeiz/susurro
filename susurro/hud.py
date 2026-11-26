@@ -355,7 +355,7 @@ class _Target(NSObject):
 class PanelActions:
     toggle_pause: Callable[[], None]
     skip: Callable[[int], None]
-    stop: Callable[[], None]
+    restart: Callable[[], None]  # back to the first line; keeps playing or paused
     seek: Callable[[float], None]
     # set_setting(name, value); name is a Settings field, or "voice" for the current language.
     set_setting: Callable[[str, object], None]
@@ -409,7 +409,7 @@ class PlayerPanel:
         self._prev = self._button("backward.end.fill", lambda _: actions.skip(-1))
         self._play = self._button("pause.fill", lambda _: actions.toggle_pause())
         self._next = self._button("forward.end.fill", lambda _: actions.skip(1))
-        self._stop = self._button("stop.fill", lambda _: actions.stop())
+        self._restart = self._button("arrow.counterclockwise", lambda _: actions.restart())
         self._gear = self._button("slider.horizontal.3",
                                   lambda _: actions.toggle_section("settings"))
         self._quote = self._button("text.quote",
@@ -580,7 +580,7 @@ class PlayerPanel:
         self._close.setFrame_(NSMakeRect(CLOSE_INSET, height - CLOSE_INSET - CLOSE,
                                          CLOSE, CLOSE))
         x = PANEL_PAD
-        for b in (self._prev, self._play, self._next, self._stop):
+        for b in (self._prev, self._play, self._next, self._restart):
             b.setFrame_(NSMakeRect(x, y, ROW, ROW))
             x += ROW + 2
         x += GAP
@@ -665,7 +665,6 @@ class PlayerPanel:
             relayout = True
         if progress.finished != self._finished:
             self._finished = progress.finished
-            self._stop.setEnabled_(not self._finished)
             self._close.setHidden_(not (self._hovered or self._finished))
         icon = "play.fill" if paused else "pause.fill"
         if getattr(self, "_icon", None) != icon:
