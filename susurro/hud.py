@@ -21,9 +21,11 @@ from AppKit import (
     NSBox,
     NSFont,
     NSFontAttributeName,
+    NSFontWeightBold,
     NSForegroundColorAttributeName,
     NSImage,
     NSImageOnly,
+    NSImageSymbolConfiguration,
     NSImageView,
     NSLineBreakByTruncatingTail,
     NSMakeRect,
@@ -40,6 +42,10 @@ from AppKit import (
     NSStatusWindowLevel,
     NSTextField,
     NSTextView,
+    NSTrackingActiveAlways,
+    NSTrackingArea,
+    NSTrackingInVisibleRect,
+    NSTrackingMouseEnteredAndExited,
     NSVisualEffectBlendingModeBehindWindow,
     NSVisualEffectMaterialHUDWindow,
     NSVisualEffectStateActive,
@@ -267,6 +273,8 @@ COUNTER_W = 64
 TRANSCRIPT_H = 160
 SETTING_ROW = 46  # one row of setting tiles
 TILE_GAP = 8
+CLOSE = 18  # close button: a small circle in the top-left corner, as on notifications
+CLOSE_INSET = 6
 ROW_GAP = 6
 # Icon of each live setting's tile (SF Symbols).
 SETTING_ICONS = {"mode": "text.bubble", "speed": "speedometer", "detail": "text.alignleft",
@@ -315,8 +323,18 @@ class _TranscriptView(NSTextView):
 
 
 class _PanelView(NSVisualEffectView):
+    on_hover: Callable[[bool], None] | None = None
+
     def acceptsFirstMouse_(self, event) -> bool:
         return True
+
+    def mouseEntered_(self, event) -> None:
+        if self.on_hover:
+            self.on_hover(True)
+
+    def mouseExited_(self, event) -> None:
+        if self.on_hover:
+            self.on_hover(False)
 
 
 class _Target(NSObject):
@@ -342,6 +360,7 @@ class PanelActions:
     # set_setting(name, value); name is a Settings field, or "voice" for the current language.
     set_setting: Callable[[str, object], None]
     toggle_section: Callable[[str], None]  # "settings" | "transcript"
+    close: Callable[[], None]  # stop and close the panel
 
 
 def _symbol(name: str):
@@ -395,6 +414,23 @@ class PlayerPanel:
                                   lambda _: actions.toggle_section("settings"))
         self._quote = self._button("text.quote",
                                    lambda _: actions.toggle_section("transcript"))
+        # Close: like a notification banner's, in the top-left corner, shown on hover and
+        # once the job has finished. Added after the transport so it's on top of them.
+        self._close = self._button("xmark", lambda _: actions.close())
+        self._close.setImage_(_symbol("xmark").imageWithSymbolConfiguration_(
+            NSImageSymbolConfiguration.configurationWithPointSize_weight_(8, NSFontWeightBold)))
+        self._close.setContentTintColor_(NSColor.labelColor())
+        self._close.setWantsLayer_(True)
+        self._close.layer().setCornerRadius_(CLOSE / 2)
+        self._close.layer().setBackgroundColor_(
+            NSColor.colorWithWhite_alpha_(1.0, 0.16).CGColor())
+        self._close.setHidden_(True)
+        self._hovered = self._finished = False
+        view.on_hover = self._hover
+        view.addTrackingArea_(NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            NSMakeRect(0, 0, 0, 0),
+            NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
+            view, None))
         self._spinner = NSProgressIndicator.alloc().initWithFrame_(
             NSMakeRect(0, 0, SPINNER, SPINNER))
         self._spinner.setStyle_(NSProgressIndicatorStyleSpinning)
@@ -507,6 +543,10 @@ class PlayerPanel:
         self._view.addSubview_(b)
         return b
 
+    def _hover(self, inside: bool) -> None:
+        self._hovered = inside
+        self._close.setHidden_(not (inside or self._finished))
+
     def _picked(self, name: str, popup) -> None:
         item = popup.selectedItem()
         if item is not None:
@@ -537,6 +577,8 @@ class PlayerPanel:
         self._height = height
         y = height - PANEL_PAD - ROW  # AppKit: y grows upwards
 
+        self._close.setFrame_(NSMakeRect(CLOSE_INSET, height - CLOSE_INSET - CLOSE,
+                                         CLOSE, CLOSE))
         x = PANEL_PAD
         for b in (self._prev, self._play, self._next, self._stop):
             b.setFrame_(NSMakeRect(x, y, ROW, ROW))
@@ -621,6 +663,10 @@ class PlayerPanel:
             self._spinner.setHidden_(not spinning)
             (self._spinner.startAnimation_ if spinning else self._spinner.stopAnimation_)(None)
             relayout = True
+        if progress.finished != self._finished:
+            self._finished = progress.finished
+            self._stop.setEnabled_(not self._finished)
+            self._close.setHidden_(not (self._hovered or self._finished))
         icon = "play.fill" if paused else "pause.fill"
         if getattr(self, "_icon", None) != icon:
             self._icon = icon
@@ -745,6 +791,7 @@ class PlayerPanel:
             self._spinner.stopAnimation_(None)
             self._panel.orderOut_(None)
             self._visible = False
+            self._hover(False)  # no exit event comes once it's gone
             self._lines_shown, self._ranges, self._marked = [], [], None
             self._text.textStorage().setAttributedString_(
                 NSMutableAttributedString.alloc().init())

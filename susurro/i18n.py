@@ -6,7 +6,7 @@ import re
 
 STRINGS: dict[str, dict[str, str]] = {
     "en": {
-        "paused": "Paused", "short.mode": "Mode", "short.speed": "Speed",
+        "paused": "Paused", "finished": "Finished", "short.mode": "Mode", "short.speed": "Speed",
         "short.detail": "Detail", "short.input": "Text in", "short.output": "Speak in", "short.engine": "Engine",
         "short.voice": "Voice",
         "preparing": "Preparing audio…",
@@ -32,7 +32,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "backend.cli": "Claude Code (claude -p)", "backend.none": "not available",
     },
     "es": {
-        "paused": "En pausa", "short.mode": "Modo", "short.speed": "Velocidad",
+        "paused": "En pausa", "finished": "Terminado", "short.mode": "Modo", "short.speed": "Velocidad",
         "short.detail": "Detalle", "short.input": "Texto en", "short.output": "Hablar en", "short.engine": "Motor",
         "short.voice": "Voz",
         "preparing": "Preparando audio…",
@@ -58,7 +58,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "backend.cli": "Claude Code (claude -p)", "backend.none": "no disponible",
     },
     "pt": {
-        "paused": "Pausado", "short.mode": "Modo", "short.speed": "Velocidade",
+        "paused": "Pausado", "finished": "Concluído", "short.mode": "Modo", "short.speed": "Velocidade",
         "short.detail": "Detalhe", "short.input": "Texto em", "short.output": "Falar em", "short.engine": "Motor",
         "short.voice": "Voz",
         "preparing": "Preparando áudio…",
