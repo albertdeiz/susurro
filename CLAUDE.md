@@ -55,7 +55,7 @@ hotkey.py   event tap catches the shortcut → AX selected text, else Copy menu 
 app.py      rumps menu bar app: menus, settings, wires hotkey → player, drives the panels
 hud.py      non-activating NSPanels: player panel (transport, seek bar, karaoke transcript,
             live settings as tiles)
-            while a job runs; status pill for notices otherwise
+            from a job's start until closed; status pill for notices otherwise
 player.py   job per request: producer thread (writer → lines) and consumer thread (NSSound)
 writer.py   Claude script generation: Anthropic SDK if ANTHROPIC_API_KEY/AUTH_TOKEN, else `claude -p`
 tts.py      edge-tts (online neural voices) or macOS voices via NSSpeechSynthesizer (offline)
@@ -84,7 +84,9 @@ Latency design (measured; keep it):
 
 Player status is a plain string read by a 0.15 s `rumps.Timer` in `app.py`: `idle`, `preparing`,
 `thinking`, `speaking`, `paused` or `error: …`; `Player.progress()` gives the panel a copy of the
-lines, position and current word. The hotkey callbacks run on a background thread, so they only
+lines, position and current word. A job that ended or was stopped stays as `Player._done`
+(`Progress.finished`) until `dismiss` (the panel's ✕); play/seek on it replays its script
+without asking Claude again. The hotkey callbacks run on a background thread, so they only
 set state; the timer is what touches AppKit.
 
 ## Hard-won details (do not regress)

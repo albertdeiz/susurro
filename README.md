@@ -35,8 +35,9 @@ selection ──⌃S──▶ menu bar app (reads it through Accessibility, or c
                    player.py  (one line plays while the next ones are synthesized; pause/seek)
 ```
 
-- **Player:** while it speaks, a floating panel shows up (it never takes focus from your app;
-  drag it anywhere):
+- **Player:** when it starts speaking, a floating panel shows up (it never takes focus from
+  your app; drag it anywhere). It stays open after the speech ends, so you can replay it, until
+  you close it with the ✕ in its top-left corner (shown on hover, and always once it's done):
   - previous/next line, pause, stop, and a seek bar over the whole script with a line counter;
   - a karaoke transcript (the quote button shows or hides it): the line being read and its
     current word are highlighted; click any word to jump there;
