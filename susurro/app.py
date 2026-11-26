@@ -31,7 +31,7 @@ class SusurroApp(rumps.App):
         self.panel = PlayerPanel(PanelActions(
             toggle_pause=self.player.toggle_pause, skip=self.player.skip, stop=self.player.stop,
             seek=self.player.seek, set_setting=self._set_from_panel,
-            toggle_section=self._toggle_section, close=self.player.dismiss))
+            toggle_section=self._toggle_section, close=self.player.stop))
         self._hud_state: tuple[str, bool] | None = None
         self._flash: tuple[str, float] | None = None  # (text, until) for short notices
         self.status_item: rumps.MenuItem | None = None

@@ -84,9 +84,9 @@ Latency design (measured; keep it):
 
 Player status is a plain string read by a 0.15 s `rumps.Timer` in `app.py`: `idle`, `preparing`,
 `thinking`, `speaking`, `paused` or `error: …`; `Player.progress()` gives the panel a copy of the
-lines, position and current word. A job that ended or was stopped stays as `Player._done`
-(`Progress.finished`) until `dismiss` (the panel's ✕); play/seek on it replays its script
-without asking Claude again. The hotkey callbacks run on a background thread, so they only
+lines, position and current word. A job that played to the end stays as `Player._done`
+(`Progress.finished`) until `stop` (the panel's ✕, the menu, the CLI); play/seek on it
+replays its script without asking Claude again. The hotkey callbacks run on a background thread, so they only
 set state; the timer is what touches AppKit.
 
 ## Hard-won details (do not regress)

@@ -7,7 +7,8 @@ has its synthesis running on the shared pool, so the player only waits for the n
 Audio already played is kept until the job ends, so jumping back is instant.
 
 Audio plays in-process through NSSound, which can pause, seek and report its position.
-A new `speak` cancels the previous job; `stop` cuts the audio immediately.
+A new `speak` cancels the previous job; `stop` cuts the audio immediately and drops the job.
+A job that plays to the end is kept, so it can be replayed, until `stop`.
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ class Progress:
     paused: bool
     mode: str
     word: tuple[int, int] | None  # (start, end) of the word being said in the current line
-    finished: bool = False  # the job is over (ended or stopped); kept until dismissed
+    finished: bool = False  # the job played to the end; kept until stopped
 
 
 class Job:
@@ -103,7 +104,7 @@ class Player:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: Job | None = None
-        self._done: Job | None = None  # last job, kept for the panel after it ends
+        self._done: Job | None = None  # last job that played to the end, kept for the panel
         self.status = "idle"  # idle | preparing | thinking | speaking | paused | error: …
         self.language = ""  # speech language of the current/last job
         self.source = ""  # language of its text
@@ -148,20 +149,12 @@ class Player:
 
     def stop(self) -> None:
         with self._lock:
-            job, self._job = self._job, None
-            if job and job.lines:
-                self._done = job
+            job, self._job, self._done = self._job, None, None
         if job:
             job.cancel.set()  # the consumer stops the sound and deletes the audio
             with job.cond:
                 job.cond.notify_all()
         self.status = "idle"
-
-    def dismiss(self) -> None:
-        """Stop, and forget the finished job: the panel closes."""
-        self.stop()
-        with self._lock:
-            self._done = None
 
     def toggle_pause(self) -> None:
         job = self._job
