@@ -79,6 +79,7 @@ class Progress:
     paused: bool
     mode: str
     word: tuple[int, int] | None  # (start, end) of the word being said in the current line
+    finished: bool = False  # the job is over (ended or stopped); kept until dismissed
 
 
 class Job:
@@ -95,12 +96,14 @@ class Job:
         self.gen = 0  # bumped by seeks and voice changes: interrupts the line playing
         self.paused = False
         self.word: tuple[int, int] | None = None
+        self.pending: Settings | None = None  # settings changed after the job ended
 
 
 class Player:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._job: Job | None = None
+        self._done: Job | None = None  # last job, kept for the panel after it ends
         self.status = "idle"  # idle | preparing | thinking | speaking | paused | error: …
         self.language = ""  # speech language of the current/last job
         self.source = ""  # language of its text
@@ -117,7 +120,7 @@ class Player:
         source, lang = resolve_languages(text, s)
         job = Job(text, s, source, lang)
         with self._lock:
-            self._job = job
+            self._job, self._done = job, None
         self.last_text = text
         self.source, self.language = source, lang
         self.status = "thinking" if writer.needs_claude(s.mode, source, lang) else "preparing"
@@ -146,21 +149,32 @@ class Player:
     def stop(self) -> None:
         with self._lock:
             job, self._job = self._job, None
+            if job and job.lines:
+                self._done = job
         if job:
             job.cancel.set()  # the consumer stops the sound and deletes the audio
             with job.cond:
                 job.cond.notify_all()
         self.status = "idle"
 
+    def dismiss(self) -> None:
+        """Stop, and forget the finished job: the panel closes."""
+        self.stop()
+        with self._lock:
+            self._done = None
+
     def toggle_pause(self) -> None:
         job = self._job
         if job:
             job.paused = not job.paused
+        elif (done := self._done) is not None:
+            self._replay(done.index if done.index < len(done.lines) else 0)
 
     def seek(self, pos: float) -> None:
         """Jump to line int(pos), a fraction pos % 1 into it."""
         job = self._job
         if not job:
+            self._replay(pos)
             return
         with job.cond:
             n = len(job.lines)
@@ -178,6 +192,8 @@ class Player:
         """Next/previous line. Previous restarts the current line if it's well under way."""
         job = self._job
         if not job:
+            if (done := self._done) is not None:
+                self._replay(max(0, min(done.index, len(done.lines)) + delta))
             return
         if delta < 0 and job.position > RESTART_LINE:
             delta = 0
@@ -187,6 +203,8 @@ class Player:
         """Apply settings changed during playback: new audio, or a new script if needed."""
         job = self._job
         if not job:
+            if (done := self._done) is not None:
+                done.pending = copy.deepcopy(settings)  # used if it's played again
             return
         s = copy.deepcopy(settings)
         if needs_rewrite(job, s):
@@ -209,12 +227,44 @@ class Player:
 
     def progress(self) -> Progress | None:
         job = self._job
-        if not job:
+        if job:
+            with job.cond:
+                return Progress([(ln.speaker, ln.text) for ln in job.lines], job.index,
+                                job.position, job.written, job.paused, job.settings.mode,
+                                job.word)
+        done = self._done
+        if not done:
             return None
-        with job.cond:
-            return Progress([(ln.speaker, ln.text) for ln in job.lines], job.index,
-                            job.position, job.written, job.paused, job.settings.mode,
-                            job.word)
+        with done.cond:
+            return Progress([(ln.speaker, ln.text) for ln in done.lines], done.index,
+                            done.position, True, True, done.settings.mode, None, True)
+
+    def _replay(self, pos: float) -> None:
+        """Play the finished job again from line int(pos), reusing its script."""
+        with self._lock:
+            done = self._done
+        if done is None:
+            return
+        with done.cond:
+            lines = [Line(ln.speaker, ln.text) for ln in done.lines]
+        if not lines or pos >= len(lines):
+            return
+        s = done.pending or done.settings
+        if done.pending and needs_rewrite(done, s):
+            self.speak(done.text, s)  # the change needs a new script anyway
+            return
+        source, lang = (resolve_languages(done.text, s) if done.pending
+                        else (done.source, done.lang))
+        job = Job(done.text, s, source, lang)
+        job.lines, job.written = lines, True
+        pos = max(0.0, pos)
+        job.index, job.offset = int(pos), pos - int(pos)
+        job.position = job.offset
+        with self._lock:
+            self._job, self._done = job, None
+        self.source, self.language = source, lang
+        self.status = "preparing"
+        threading.Thread(target=self._consume, args=(job,), daemon=True).start()
 
     @property
     def busy(self) -> bool:
@@ -291,6 +341,7 @@ class Player:
             with self._lock:
                 if self._job is job:
                     self._job = None
+                    self._done = job if job.lines else None
                     if not self.status.startswith("error"):
                         self.status = "idle"
 
